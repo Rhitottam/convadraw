@@ -30,34 +30,48 @@ interface CanvasProps {
 const MIN_SIZE_MULTIPLIER = 2;
 const MAX_SIZE_MULTIPLIER = 200;
 
-// ============= Memory-Efficient Image Loading =============
+// ============= Memory-Efficient Image Loading with LOD =============
 // Worker caches compressed blobs (~100-200KB each)
 // Main thread only holds decoded bitmaps for VISIBLE images
+// Bitmaps are re-decoded at appropriate resolution when zoom/size changes
 // Bitmaps are closed when images leave viewport
+
+// Resolution levels - same URL decoded at different sizes
+const LOD_LEVELS = {
+  small: 150,   // For thumbnails / zoomed out
+  medium: 400,  // For normal view
+  full: 0,      // 0 = original resolution
+} as const;
+
+type LODLevel = keyof typeof LOD_LEVELS;
 
 // Track which blobs are cached in the worker
 const cachedBlobs = new Set<string>();
 const loadingBlobs = new Set<string>();
 
-// Track decoded bitmaps for visible images only (closed when not visible)
-const decodedBitmaps = new Map<string, ImageBitmap>();
-const decodingImages = new Set<string>();
+// Track decoded bitmaps with their current LOD level
+interface DecodedEntry {
+  bitmap: ImageBitmap;
+  level: LODLevel;
+}
+const decodedBitmaps = new Map<string, DecodedEntry>();
+const decodingImages = new Map<string, LODLevel>(); // Track what level is being decoded
 
 let imageWorker: Worker | null = null;
 
-function getMaxDimForDisplay(displayWidth: number, displayHeight: number): number {
+// Determine which LOD level to use based on display size
+function getLODLevel(displayWidth: number, displayHeight: number): LODLevel {
   const maxDim = Math.max(displayWidth, displayHeight);
-  // Choose appropriate decode size based on display size
-  if (maxDim <= 150) return 150;
-  if (maxDim <= 400) return 400;
-  return 0; // 0 means full resolution
+  if (maxDim <= 150) return 'small';
+  if (maxDim <= 400) return 'medium';
+  return 'full';
 }
 
 function getImageWorker(): Worker {
   if (!imageWorker) {
     imageWorker = new ImageLoaderWorker();
     imageWorker.onmessage = (e) => {
-      const { type, id, bitmap } = e.data;
+      const { type, id, bitmap, requestedMaxDim } = e.data;
       
       if (type === 'cached') {
         // Blob is now cached in worker, ready for decode
@@ -65,15 +79,19 @@ function getImageWorker(): Worker {
         loadingBlobs.delete(id);
         window.dispatchEvent(new CustomEvent('blob-cached', { detail: { id } }));
       } else if (type === 'decoded' && bitmap) {
-        // Decoded bitmap received
+        // Determine which level this decode was for
+        const level = decodingImages.get(id) || 
+          (requestedMaxDim === 150 ? 'small' : requestedMaxDim === 400 ? 'medium' : 'full');
         decodingImages.delete(id);
+        
         // Close any existing bitmap for this id
         const existing = decodedBitmaps.get(id);
         if (existing) {
-          try { existing.close(); } catch { /* ignore */ }
+          try { existing.bitmap.close(); } catch { /* ignore */ }
         }
-        decodedBitmaps.set(id, bitmap);
-        window.dispatchEvent(new CustomEvent('image-decoded', { detail: { id } }));
+        
+        decodedBitmaps.set(id, { bitmap, level });
+        window.dispatchEvent(new CustomEvent('image-decoded', { detail: { id, level } }));
       } else if (type === 'error') {
         loadingBlobs.delete(id);
         decodingImages.delete(id);
@@ -91,24 +109,35 @@ function requestBlobCache(src: string): void {
   worker.postMessage({ type: 'load', id: src, src });
 }
 
-// Request decode of a cached blob at specific size
-function requestDecode(src: string, maxDim: number): void {
-  if (!cachedBlobs.has(src) || decodingImages.has(src)) return;
-  decodingImages.add(src);
+// Request decode of a cached blob at specific LOD level
+function requestDecode(src: string, level: LODLevel): void {
+  if (!cachedBlobs.has(src)) return;
+  
+  // Skip if already decoding at this or higher level
+  const currentlyDecoding = decodingImages.get(src);
+  if (currentlyDecoding) {
+    // If we're already decoding at a higher quality level, don't downgrade
+    const levels: LODLevel[] = ['small', 'medium', 'full'];
+    if (levels.indexOf(currentlyDecoding) >= levels.indexOf(level)) return;
+  }
+  
+  decodingImages.set(src, level);
   const worker = getImageWorker();
+  const maxDim = LOD_LEVELS[level];
   worker.postMessage({ type: 'decode', id: src, maxDim });
 }
 
 // Release a bitmap when image is no longer visible
 function releaseBitmap(src: string): void {
-  const bitmap = decodedBitmaps.get(src);
-  if (bitmap) {
-    try { bitmap.close(); } catch { /* ignore */ }
+  const entry = decodedBitmaps.get(src);
+  if (entry) {
+    try { entry.bitmap.close(); } catch { /* ignore */ }
     decodedBitmaps.delete(src);
   }
+  decodingImages.delete(src);
 }
 
-// Hook for on-demand image loading
+// Hook for on-demand image loading with LOD support
 function useImageOnDemand(
   src: string,
   displayWidth: number,
@@ -116,9 +145,9 @@ function useImageOnDemand(
   isVisible: boolean
 ): ImageBitmap | undefined {
   const [, forceUpdate] = useState(0);
-  const maxDim = getMaxDimForDisplay(displayWidth, displayHeight);
+  const neededLevel = getLODLevel(displayWidth, displayHeight);
 
-  // Start loading blob when visible
+  // Start loading blob and decode when visible
   useEffect(() => {
     if (!isVisible) return;
     
@@ -127,8 +156,8 @@ function useImageOnDemand(
     
     const handleCached = (e: CustomEvent) => {
       if (e.detail.id === src) {
-        // Blob cached, now request decode
-        requestDecode(src, maxDim);
+        // Blob cached, now request decode at needed level
+        requestDecode(src, neededLevel);
       }
     };
     
@@ -141,16 +170,29 @@ function useImageOnDemand(
     window.addEventListener('blob-cached', handleCached as EventListener);
     window.addEventListener('image-decoded', handleDecoded as EventListener);
     
-    // If already cached, request decode immediately
-    if (cachedBlobs.has(src) && !decodedBitmaps.has(src) && !decodingImages.has(src)) {
-      requestDecode(src, maxDim);
+    // If blob already cached, check if we need to decode/upgrade
+    if (cachedBlobs.has(src)) {
+      const existing = decodedBitmaps.get(src);
+      if (!existing) {
+        // No bitmap yet, request decode
+        requestDecode(src, neededLevel);
+      } else {
+        // Check if we need a higher resolution
+        const levels: LODLevel[] = ['small', 'medium', 'full'];
+        const currentIdx = levels.indexOf(existing.level);
+        const neededIdx = levels.indexOf(neededLevel);
+        if (neededIdx > currentIdx && !decodingImages.has(src)) {
+          // Need higher resolution, request upgrade
+          requestDecode(src, neededLevel);
+        }
+      }
     }
     
     return () => {
       window.removeEventListener('blob-cached', handleCached as EventListener);
       window.removeEventListener('image-decoded', handleDecoded as EventListener);
     };
-  }, [src, isVisible, maxDim]);
+  }, [src, isVisible, neededLevel]);
 
   // Release bitmap when no longer visible
   useEffect(() => {
@@ -159,14 +201,8 @@ function useImageOnDemand(
     }
   }, [src, isVisible]);
 
-  // Force update when bitmap becomes available
-  useEffect(() => {
-    if (decodedBitmaps.has(src)) {
-      forceUpdate((n) => n + 1);
-    }
-  }, [src]);
-
-  return isVisible ? decodedBitmaps.get(src) : undefined;
+  const entry = decodedBitmaps.get(src);
+  return isVisible ? entry?.bitmap : undefined;
 }
 
 // Selection rectangle for rubber band selection

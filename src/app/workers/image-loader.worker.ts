@@ -105,7 +105,7 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
       // Decode blob to ImageBitmap at requested size
       const bitmap = await decodeAndScale(blob, maxDim);
       
-      // Transfer bitmap to main thread
+      // Transfer bitmap to main thread with requested resolution info
       (self as unknown as Worker).postMessage(
         { 
           type: 'decoded', 
@@ -113,6 +113,7 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
           bitmap,
           width: bitmap.width,
           height: bitmap.height,
+          requestedMaxDim: maxDim, // Include what was requested for LOD tracking
         }, 
         [bitmap]
       );
