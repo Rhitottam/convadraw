@@ -63,24 +63,24 @@ wasm.updateCanvasSize(window.innerWidth, window.innerHeight);
 
 ### Object Management
 
-#### `addObject(id: i32, x: f32, y: f32, width: f32, height: f32, assetId: i32): void`
+#### `addObject(x: f32, y: f32, width: f32, height: f32, assetId: u32, objectType: u8): u32`
 
-Add an object to the canvas.
+Add an object to the canvas. Returns the object's unique ID.
 
 ```typescript
-wasm.addObject(1, 100.0, 200.0, 400.0, 300.0, 101);
+const objectId = wasm.addObject(100.0, 200.0, 400.0, 300.0, assetId, 1);
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `id` | `i32` | Unique object identifier |
 | `x` | `f32` | X position |
 | `y` | `f32` | Y position |
 | `width` | `f32` | Object width |
 | `height` | `f32` | Object height |
-| `assetId` | `i32` | Associated asset ID |
+| `assetId` | `u32` | Associated asset ID (for image lookup) |
+| `objectType` | `u8` | Object type (1 = image) |
 
-#### `moveObject(id: i32, newX: f32, newY: f32): void`
+#### `moveObject(objectId: u32, newX: f32, newY: f32): void`
 
 Move an object to a new position (with undo support).
 
@@ -88,12 +88,40 @@ Move an object to a new position (with undo support).
 wasm.moveObject(1, 150.0, 250.0);
 ```
 
-#### `deleteObject(id: i32): void`
+#### `resizeObject(objectId: u32, newX: f32, newY: f32, newWidth: f32, newHeight: f32): void`
+
+Resize an object (with undo support). Position may change for corner resizes.
+
+```typescript
+wasm.resizeObject(1, 100.0, 100.0, 600.0, 400.0);
+```
+
+#### `deleteObject(objectId: u32): void`
 
 Remove an object from the canvas (with undo support).
 
 ```typescript
 wasm.deleteObject(1);
+```
+
+#### Object Queries
+
+```typescript
+// Get total object count
+const count = wasm.getObjectCount();
+
+// Get object ID by index
+const id = wasm.getObjectIdAtIndex(0);
+
+// Get object properties
+const x = wasm.getObjectX(id);
+const y = wasm.getObjectY(id);
+const width = wasm.getObjectWidth(id);
+const height = wasm.getObjectHeight(id);
+const assetId = wasm.getObjectAssetId(id);
+
+// Check if object exists
+const exists = wasm.objectExists(id);
 ```
 
 ### Camera & Viewport
@@ -181,20 +209,55 @@ wasm.setGridSnap(true);
 
 ### Undo/Redo
 
-#### `undo(): void`
+The command history system supports undo/redo for all canvas operations.
 
-Undo the last operation.
+#### `undo(): boolean`
+
+Undo the last operation. Returns `true` if successful.
 
 ```typescript
-wasm.undo();
+if (wasm.undo()) {
+  console.log('Undone successfully');
+}
 ```
 
-#### `redo(): void`
+#### `redo(): boolean`
 
-Redo the previously undone operation.
+Redo the previously undone operation. Returns `true` if successful.
 
 ```typescript
-wasm.redo();
+if (wasm.redo()) {
+  console.log('Redone successfully');
+}
+```
+
+#### `canUndo(): boolean`
+
+Check if undo is available.
+
+```typescript
+if (wasm.canUndo()) {
+  // Enable undo button
+}
+```
+
+#### `canRedo(): boolean`
+
+Check if redo is available.
+
+```typescript
+if (wasm.canRedo()) {
+  // Enable redo button
+}
+```
+
+#### State Version
+
+The state version increments on every change, useful for React subscriptions:
+
+```typescript
+const version = wasm.getStateVersion();
+// Use to trigger React re-renders when state changes
 ```
 
 ## Quadtree Implementation

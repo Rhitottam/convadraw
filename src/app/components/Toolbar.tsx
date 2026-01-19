@@ -5,7 +5,8 @@ import { Label } from '@/components/ui/label';
 import type { ToolType } from '@/types/tools';
 import type { WASMExports } from '@/types/wasm';
 import { Grid3X3, Hand, ImagePlus, MousePointer2, Redo2, Undo2 } from 'lucide-react';
-import { memo } from 'react';
+import { memo, useCallback } from 'react';
+import { useCanvasActions } from '../hooks/useCanvasStore';
 
 interface ToolbarProps {
   wasm: WASMExports | null;
@@ -28,13 +29,15 @@ export const Toolbar = memo(function Toolbar({
   onGridSizeChange,
   onAddImage,
 }: ToolbarProps) {
-  const handleUndo = () => {
-    wasm?.undo();
-  };
+  const { undo, redo } = useCanvasActions(wasm);
+  
+  const handleUndo = useCallback(() => {
+    undo();
+  }, [undo]);
 
-  const handleRedo = () => {
-    wasm?.redo();
-  };
+  const handleRedo = useCallback(() => {
+    redo();
+  }, [redo]);
 
   return (
     <>

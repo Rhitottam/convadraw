@@ -392,14 +392,112 @@ self.onmessage = async (e) => {
 };
 ```
 
+## Undo/Redo System
+
+CloudGrid features a comprehensive undo/redo system powered by WASM state management. All canvas operations (move, resize, delete) are recorded in a command history.
+
+### State Management Architecture
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│  React State    │◄───│  useCanvasStore │◄───│  WASM State     │
+│  (Read-Only)    │    │  (Sync Bridge)  │    │  (Source Truth) │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                      │                      ▲
+         ▼                      ▼                      │
+    [Components]           [Actions]              [Commands]
+         │                      │                      │
+         └──────────────────────┴──────────────────────┘
+                    User Interactions
+```
+
+### useCanvasStore Hook
+
+```typescript
+import { useCanvasStore, useCanvasActions, syncFromWasm } from '@/hooks/useCanvasStore';
+
+// Get images from WASM state
+const { images, stateVersion } = useCanvasStore();
+
+// Get action functions
+const { moveObject, resizeObject, deleteObject } = useCanvasActions(wasm);
+
+// All mutations go through WASM commands
+moveObject(objectId, newX, newY);      // Creates MoveCommand
+resizeObject(id, x, y, width, height); // Creates ResizeCommand
+deleteObject(objectId);                // Creates DeleteObjectCommand
+```
+
+### Undo/Redo Shortcuts
+
+```typescript
+import { useUndoRedoShortcuts } from '@/hooks/useCanvasStore';
+
+// Adds Ctrl+Z (undo) and Ctrl+Shift+Z/Ctrl+Y (redo) shortcuts
+useUndoRedoShortcuts(wasm, () => {
+  // Optional callback after undo/redo
+  // Good for clearing stale selections
+});
+```
+
+### Command Types
+
+| Command | Description |
+|---------|-------------|
+| `MoveCommand` | Move a single object |
+| `BatchMoveCommand` | Move multiple objects together |
+| `ResizeCommand` | Resize an object (position + dimensions) |
+| `AddObjectCommand` | Add a new object |
+| `DeleteObjectCommand` | Delete a single object |
+| `BatchDeleteCommand` | Delete multiple objects |
+
+### Programmatic Undo/Redo
+
+```typescript
+// Check if actions are available
+const canUndo = wasm.canUndo();
+const canRedo = wasm.canRedo();
+
+// Execute undo/redo
+if (canUndo) {
+  wasm.undo();
+  syncFromWasm(wasm); // Sync to React
+}
+
+if (canRedo) {
+  wasm.redo();
+  syncFromWasm(wasm);
+}
+```
+
+### History Limits
+
+The command history is limited to 100 entries to prevent memory issues:
+
+```typescript
+// In WASM canvas-manager.ts
+this.commandHistory = new CommandHistory(100);
+```
+
 ## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl/Cmd + Z` | Undo |
+| `Ctrl/Cmd + Shift + Z` | Redo |
+| `Ctrl/Cmd + Y` | Redo (alternative) |
+| `Delete / Backspace` | Delete selected items |
+| `Ctrl/Cmd + A` | Select all items |
+| `Shift + Click` | Toggle selection |
 
 ```typescript
 useEffect(() => {
   const handleKeyDown = (e: KeyboardEvent) => {
+    // Undo/Redo handled by useUndoRedoShortcuts
+    
     // Delete selected items
     if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.length > 0) {
-      setImages(prev => prev.filter(img => !selectedIds.includes(img.id)));
+      selectedIds.forEach(id => deleteObject(getNumericId(id)));
       setSelectedIds([]);
     }
     
@@ -412,7 +510,7 @@ useEffect(() => {
 
   document.addEventListener('keydown', handleKeyDown);
   return () => document.removeEventListener('keydown', handleKeyDown);
-}, [selectedIds, images]);
+}, [selectedIds, images, deleteObject]);
 ```
 
 ## Performance Tips

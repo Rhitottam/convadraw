@@ -23,6 +23,13 @@ export class GridSystem {
     return result;
   }
   
+  snapValue(value: f32): f32 {
+    if (this.snapEnabled) {
+      return Mathf.round(value / this.gridSize) * this.gridSize;
+    }
+    return value;
+  }
+  
   snapObject(obj: CanvasObject): void {
     if (!this.snapEnabled) return;
     

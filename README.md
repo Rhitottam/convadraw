@@ -15,6 +15,7 @@ A high-performance infinite canvas built with **React**, **Konva.js**, and **Web
 - 📐 **Grid Snapping** - Configurable grid with snap-to-grid positioning
 - 🎨 **Level of Detail** - Dynamic image resolution based on zoom level
 - ⚡ **Web Workers** - Offloaded grid rendering and image processing
+- ↩️ **Undo/Redo** - Full command history for all operations
 - 📱 **Responsive** - Works on desktop and tablet devices
 
 ## 🚀 Quick Start
@@ -109,6 +110,8 @@ See [docs/WASM_API.md](./docs/WASM_API.md) for WASM module documentation.
 | Resize | Drag corner handles (keeps aspect ratio) |
 | Delete | Delete or Backspace key |
 | Select All | Ctrl/Cmd + A |
+| Undo | Ctrl/Cmd + Z |
+| Redo | Ctrl/Cmd + Shift + Z or Ctrl/Cmd + Y |
 
 ## 🔧 Configuration
 
