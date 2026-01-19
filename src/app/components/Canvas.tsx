@@ -57,6 +57,14 @@ interface DecodedEntry {
 const decodedBitmaps = new Map<string, DecodedEntry>();
 const decodingImages = new Map<string, LODLevel>(); // Track what level is being decoded
 
+// Color data for sorting
+interface ImageColor {
+  r: number;
+  g: number;
+  b: number;
+}
+const imageColors = new Map<string, ImageColor>();
+
 let imageWorker: Worker | null = null;
 
 // Determine which LOD level to use based on display size
@@ -71,12 +79,19 @@ function getImageWorker(): Worker {
   if (!imageWorker) {
     imageWorker = new ImageLoaderWorker();
     imageWorker.onmessage = (e) => {
-      const { type, id, bitmap, requestedMaxDim } = e.data;
+      const { type, id, bitmap, requestedMaxDim, color } = e.data;
       
       if (type === 'cached') {
         // Blob is now cached in worker, ready for decode
         cachedBlobs.add(id);
         loadingBlobs.delete(id);
+        
+        // Store color data for sorting
+        if (color) {
+          imageColors.set(id, color);
+          window.dispatchEvent(new CustomEvent('image-color-ready', { detail: { id, color } }));
+        }
+        
         window.dispatchEvent(new CustomEvent('blob-cached', { detail: { id } }));
       } else if (type === 'decoded' && bitmap) {
         // Determine which level this decode was for
@@ -404,6 +419,11 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   const animationIdRef = useRef(0);
   const wasmInitializedRef = useRef(false);
   const imageNodesRef = useRef<Map<string, Konva.Image | null>>(new Map());
+  
+  // Color sorting state
+  const colorSortedRef = useRef(false);
+  const [colorsLoaded, setColorsLoaded] = useState(0);
+  const totalImagesRef = useRef(0);
 
   // WASM-backed state
   const { images, stateVersion } = useCanvasStore();
@@ -480,6 +500,9 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
 
     const IMAGE_COUNT = 2000;
     const COLS = 50;
+    
+    // Store total for color sorting
+    totalImagesRef.current = IMAGE_COUNT;
     const IMAGE_WIDTH = snapToGrid(400, gridSize);
     const IMAGE_HEIGHT = snapToGrid(300, gridSize);
     const GAP = snapToGrid(50, gridSize);
@@ -515,6 +538,15 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
 
     // Sync state from WASM to React
     syncFromWasm(wasm);
+    
+    // Preload all image blobs to extract colors for sorting
+    // This happens in the background without blocking rendering
+    getImageWorker(); // Ensure worker is initialized
+    
+    for (let i = 0; i < IMAGE_COUNT; i++) {
+      const src = `https://picsum.photos/seed/cloudgrid${i}/${imageSizes[i % imageSizes.length].w}/${imageSizes[i % imageSizes.length].h}`;
+      requestBlobCache(src);
+    }
   }, [wasm, dimensions.width, dimensions.height, gridSize]);
 
   // FPS counter
@@ -531,6 +563,114 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     animationIdRef.current = requestAnimationFrame(updateStats);
     return () => cancelAnimationFrame(animationIdRef.current);
   }, [visibleImages.length, images.length, onStatsUpdate]);
+
+  // Track color loading progress
+  useEffect(() => {
+    const handleColorReady = () => {
+      setColorsLoaded(imageColors.size);
+    };
+    
+    window.addEventListener('image-color-ready', handleColorReady as EventListener);
+    return () => window.removeEventListener('image-color-ready', handleColorReady as EventListener);
+  }, []);
+
+  // Sort images by color when all colors are loaded
+  useEffect(() => {
+    if (!wasm || colorSortedRef.current) return;
+    if (totalImagesRef.current === 0 || colorsLoaded < totalImagesRef.current) return;
+    
+    // All colors loaded, perform sorting
+    colorSortedRef.current = true;
+    console.log('All colors loaded, sorting by RGB...');
+    
+    const IMAGE_COUNT = totalImagesRef.current;
+    const COLS = 50;
+    const ROWS = Math.ceil(IMAGE_COUNT / COLS);
+    
+    // Calculate color score for each image: (R - G) / (R + G + B + 1)
+    // Higher = more red, Lower = more green, Middle = more blue
+    const imageScores: Array<{ id: string; src: string; score: number; originalIdx: number }> = [];
+    
+    images.forEach((img, idx) => {
+      const color = imageColors.get(img.src);
+      if (color) {
+        const { r, g, b } = color;
+        const score = (r - g) / (r + g + b + 1);
+        imageScores.push({ id: img.id, src: img.src, score, originalIdx: idx });
+      }
+    });
+    
+    // Sort by score (highest/reddest first)
+    imageScores.sort((a, b) => b.score - a.score);
+    
+    // Create position mapping based on diagonal index
+    // diagIdx = row + (maxCol - col), lower = top-right (reddest), higher = bottom-left (greenest)
+    const positions: Array<{ row: number; col: number; diagIdx: number }> = [];
+    for (let row = 0; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        const idx = row * COLS + col;
+        if (idx >= IMAGE_COUNT) break;
+        const diagIdx = row + (COLS - 1 - col);
+        positions.push({ row, col, diagIdx });
+      }
+    }
+    
+    // Sort positions by diagonal index (ascending = top-right first)
+    positions.sort((a, b) => a.diagIdx - b.diagIdx);
+    
+    // Calculate new positions
+    const IMAGE_WIDTH = snapToGrid(400, gridSize);
+    const IMAGE_HEIGHT = snapToGrid(300, gridSize);
+    const GAP = snapToGrid(50, gridSize);
+    const CELL_WIDTH = IMAGE_WIDTH + GAP;
+    const CELL_HEIGHT = IMAGE_HEIGHT + GAP;
+    const offsetX = snapToGrid(-(COLS * CELL_WIDTH) / 2, gridSize);
+    const offsetY = snapToGrid(-(ROWS * CELL_HEIGHT) / 2, gridSize);
+    
+    // Map sorted images to sorted positions
+    const moves: Array<{ id: string; numericId: number; newX: number; newY: number }> = [];
+    
+    imageScores.forEach((imgScore, sortedIdx) => {
+      if (sortedIdx >= positions.length) return;
+      const pos = positions[sortedIdx];
+      const newX = offsetX + pos.col * CELL_WIDTH;
+      const newY = offsetY + pos.row * CELL_HEIGHT;
+      const numericId = getNumericId(imgScore.id);
+      
+      if (numericId !== null) {
+        moves.push({ id: imgScore.id, numericId, newX, newY });
+      }
+    });
+    
+    // Animate moves using Konva
+    const animationDuration = 1.5; // seconds
+    
+    moves.forEach((move) => {
+      const node = imageNodesRef.current.get(move.id);
+      if (node) {
+        // Animate the Konva node
+        node.to({
+          x: move.newX,
+          y: move.newY,
+          duration: animationDuration,
+          easing: Konva.Easings.EaseInOut,
+          onFinish: () => {
+            // Update WASM state after animation completes
+            wasm.moveObject(move.numericId, move.newX, move.newY);
+          },
+        });
+      } else {
+        // Node not visible, update WASM directly
+        wasm.moveObject(move.numericId, move.newX, move.newY);
+      }
+    });
+    
+    // Sync state after a delay to ensure animations complete
+    setTimeout(() => {
+      syncFromWasm(wasm);
+    }, animationDuration * 1000 + 100);
+    
+  }, [wasm, colorsLoaded, images, gridSize]);
 
   // Add image globally (for testing)
   useEffect(() => {

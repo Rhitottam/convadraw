@@ -1,5 +1,6 @@
 // Image loading Web Worker - caches compressed blobs and decodes on-demand
 // Memory efficient: stores ~100KB blobs instead of ~8MB ImageBitmaps
+// Also extracts dominant color for sorting
 
 interface LoadMessage {
   type: 'load';
@@ -18,6 +19,43 @@ type WorkerMessage = LoadMessage | DecodeMessage;
 // Blob cache - stores compressed image data (~50-200KB each)
 const blobCache = new Map<string, Blob>();
 const loadingSet = new Set<string>();
+
+// Extract average RGB from an ImageBitmap by sampling pixels
+async function extractAverageColor(bitmap: ImageBitmap): Promise<{ r: number; g: number; b: number }> {
+  // Use a small canvas for sampling (faster than full resolution)
+  const sampleSize = 50;
+  const canvas = new OffscreenCanvas(sampleSize, sampleSize);
+  const ctx = canvas.getContext('2d');
+  
+  if (!ctx) {
+    return { r: 128, g: 128, b: 128 }; // Fallback to gray
+  }
+  
+  // Draw scaled down image
+  ctx.drawImage(bitmap, 0, 0, sampleSize, sampleSize);
+  
+  // Get pixel data
+  const imageData = ctx.getImageData(0, 0, sampleSize, sampleSize);
+  const data = imageData.data;
+  
+  let totalR = 0, totalG = 0, totalB = 0;
+  const pixelCount = sampleSize * sampleSize;
+  
+  // Sum all RGB values
+  for (let i = 0; i < data.length; i += 4) {
+    totalR += data[i];     // R
+    totalG += data[i + 1]; // G
+    totalB += data[i + 2]; // B
+    // data[i + 3] is alpha, skip
+  }
+  
+  // Calculate averages
+  return {
+    r: Math.round(totalR / pixelCount),
+    g: Math.round(totalG / pixelCount),
+    b: Math.round(totalB / pixelCount),
+  };
+}
 
 // Generate a scaled ImageBitmap from a blob
 async function decodeAndScale(blob: Blob, maxDim: number): Promise<ImageBitmap> {
@@ -85,8 +123,22 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
       blobCache.set(id, blob);
       loadingSet.delete(id);
       
-      // Notify main thread that blob is cached and ready for decode
-      (self as unknown as Worker).postMessage({ type: 'cached', id });
+      // Extract average color for sorting (decode temporarily for color extraction)
+      let color = { r: 128, g: 128, b: 128 }; // Default gray
+      try {
+        const tempBitmap = await createImageBitmap(blob);
+        color = await extractAverageColor(tempBitmap);
+        tempBitmap.close(); // Free memory
+      } catch {
+        // Color extraction failed, use default
+      }
+      
+      // Notify main thread that blob is cached with color info
+      (self as unknown as Worker).postMessage({ 
+        type: 'cached', 
+        id,
+        color, // Include extracted color
+      });
     } catch (error) {
       loadingSet.delete(id);
       (self as unknown as Worker).postMessage({ type: 'error', id, error: String(error) });
