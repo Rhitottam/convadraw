@@ -6,7 +6,7 @@ import { defineConfig } from 'vite';
 export default defineConfig(({ command }) => ({
   // Base path for GitHub Pages deployment
   // Change 'cloud_grid' to your repository name
-  base: command === 'build' ? '/media_grid/' : '/',
+  base: command === 'build' ? '/convadraw/' : '/',
   
   root: '.',
   publicDir: 'public',

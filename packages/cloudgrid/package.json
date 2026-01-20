@@ -14,14 +14,14 @@
     "whiteboard",
     "performance"
   ],
-  "homepage": "https://github.com/Rhitottam/media_grid#readme",
+  "homepage": "https://github.com/Rhitottam/convadraw#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Rhitottam/media_grid.git",
+    "url": "https://github.com/Rhitottam/convadraw.git",
     "directory": "packages/cloudgrid"
   },
   "bugs": {
-    "url": "https://github.com/Rhitottam/media_grid/issues"
+    "url": "https://github.com/Rhitottam/convadraw/issues"
   },
   "license": "MIT",
   "author": {

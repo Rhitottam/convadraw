@@ -3,7 +3,7 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   plugins: [react()],
-  base: process.env.NODE_ENV === 'production' ? '/media_grid/' : '/',
+  base: process.env.NODE_ENV === 'production' ? '/convadraw/' : '/',
   server: {
     port: 3000,
   },
