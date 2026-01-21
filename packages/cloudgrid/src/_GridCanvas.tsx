@@ -275,6 +275,7 @@ function GridDots({ width, height, gridSize, stageX, stageY, scale }: GridDotsPr
       workerRef.current = createGridWorker()
       workerRef.current.onmessage = (e) => {
         if (e.data.type === 'rendered') {
+          console.log('rendered', e.data.bitmap);
           setGridBitmap(e.data.bitmap)
           pendingRef.current = false
         }
@@ -331,6 +332,7 @@ export function GridCanvas({ editor, readOnly = false }: GridCanvasProps) {
       const viewport = editor.getViewport()
       setStagePos({ x: viewport.x, y: viewport.y })
       setScale(viewport.zoom)
+      console.log('updateViewport', viewport)
     }
     const updateTool = () => setCurrentTool(editor.getCurrentTool())
 
@@ -339,6 +341,10 @@ export function GridCanvas({ editor, readOnly = false }: GridCanvasProps) {
     updateViewport()
     updateTool()
 
+    // const timeout = setTimeout(() => {
+    //     updateViewport()
+    // }, 1000)
+
     const unsubs = [
       editor.on('itemsChange', updateItems),
       editor.on('selectionChange', updateSelection),
@@ -346,7 +352,10 @@ export function GridCanvas({ editor, readOnly = false }: GridCanvasProps) {
       editor.on('toolChange', updateTool),
     ]
 
-    return () => unsubs.forEach((unsub) => unsub())
+    return () => {
+        unsubs.forEach((unsub) => unsub());
+        // clearTimeout(timeout)
+    }
   }, [editor])
 
   // Update container dimensions

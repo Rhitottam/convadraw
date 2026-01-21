@@ -13,10 +13,15 @@ interface GridMessage {
 let offscreenCanvas: OffscreenCanvas | null = null;
 let ctx: OffscreenCanvasRenderingContext2D | null = null;
 
-self.onmessage = (e: MessageEvent<GridMessage>) => {
-  const { type, width, height, gridSize, stageX, stageY, scale } = e.data;
+// Track pending render request (only keep the latest)
+let pendingRender: GridMessage | null = null;
+let isRendering = false;
+
+async function processRender(data: GridMessage) {
+  const { type, width, height, gridSize, stageX, stageY, scale } = data;
 
   if (type === 'render') {
+    isRendering = true;
     // Create or resize canvas
     if (!offscreenCanvas || offscreenCanvas.width !== width || offscreenCanvas.height !== height) {
       offscreenCanvas = new OffscreenCanvas(width, height);
@@ -75,7 +80,27 @@ self.onmessage = (e: MessageEvent<GridMessage>) => {
     // Transfer bitmap back to main thread
     const bitmap = offscreenCanvas.transferToImageBitmap();
     (self as unknown as Worker).postMessage({ type: 'rendered', bitmap }, [bitmap]);
+    
+    isRendering = false;
+    
+    // Process the next pending render if one arrived while we were rendering
+    if (pendingRender) {
+      const next = pendingRender;
+      pendingRender = null;
+      processRender(next);
+    }
+  }
+}
+
+self.onmessage = (e: MessageEvent<GridMessage>) => {
+  if (isRendering) {
+    // Already rendering - store this as the pending render (replaces any previous pending)
+    pendingRender = e.data;
+  } else {
+    // Not rendering - process immediately
+    processRender(e.data);
   }
 };
 
-export {};
+export { };
+

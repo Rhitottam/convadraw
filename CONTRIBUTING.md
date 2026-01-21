@@ -1,191 +1,276 @@
-# Contributing to CloudGrid
+# 🤝 Contributing to CloudGrid
 
-Thank you for your interest in contributing to CloudGrid! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to CloudGrid! This guide will help you get started.
 
-## Code of Conduct
+## 📚 Before You Start
 
-Please be respectful and constructive in all interactions. We welcome contributors of all backgrounds and experience levels.
+1. Read the [Architecture Guide](./docs/ARCHITECTURE.md) to understand the codebase
+2. Read the [Visual Guide](./docs/VISUAL_GUIDE.md) for diagrams and data flow
+3. Check [existing issues](https://github.com/Rhitottam/convadraw/issues) for tasks to work on
 
-## Getting Started
+## 🛠️ Development Setup
 
 ### Prerequisites
-
-- Node.js 18+
-- npm 9+
+- Node.js 18+ 
+- npm 10+
 - Git
 
-### Development Setup
+### Installation
 
-1. Fork the repository on GitHub
-2. Clone your fork:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/cloud_grid.git
-   cd cloud_grid
-   ```
+```bash
+# Clone the repository
+git clone https://github.com/Rhitottam/convadraw.git
+cd convadraw
 
-3. Install dependencies:
-   ```bash
-   npm install
-   cd src/wasm && npm install && cd ../..
-   ```
+# Install dependencies
+npm install
 
-4. Start development server:
-   ```bash
-   npm run dev
-   ```
+# Build all packages
+npm run build
 
-5. Create a feature branch:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-## Development Workflow
-
-### Project Structure
-
-```
-cloud_grid/
-├── src/
-│   ├── app/          # React application
-│   ├── wasm/         # WebAssembly (AssemblyScript)
-│   └── styles/       # CSS styles
-├── docs/             # Documentation
-└── public/           # Static assets
+# Start demo app
+cd apps/www
+npm run dev
 ```
 
-### Making Changes
+Open [http://localhost:3000](http://localhost:3000)
 
-#### React Components
-
-- Components are in `src/app/components/`
-- Use TypeScript for type safety
-- Follow existing code style and patterns
-- Use shadcn/ui components where appropriate
-
-#### WASM Module
-
-- AssemblyScript source is in `src/wasm/assembly/`
-- Build with `npm run build:wasm`
-- Test WASM changes by restarting the dev server
-
-#### Styling
-
-- Use Tailwind CSS utility classes
-- Custom styles go in `src/styles/main.css`
-- Follow the existing color scheme (green/dark theme)
-
-### Code Style
-
-- Use TypeScript strict mode
-- Follow existing naming conventions
-- Use meaningful variable and function names
-- Add comments for complex logic
-- Keep functions focused and small
-
-### Testing Changes
-
-1. Test in Chrome, Firefox, and Safari
-2. Test at different zoom levels
-3. Test with many items (2000+)
-4. Check for memory leaks with DevTools
-5. Verify mobile/touch interactions
-
-## Submitting Changes
-
-### Commit Messages
-
-Use clear, descriptive commit messages:
+## 📂 Project Structure
 
 ```
-feat: add rubber band selection for multi-select
-fix: preserve relative positions when moving groups
-docs: update WASM API documentation
-perf: optimize viewport culling for large datasets
+convadraw/
+├── packages/
+│   ├── cloudgrid/    ← Main React SDK (most contributions here)
+│   ├── wasm/         ← WebAssembly module
+│   ├── editor/       ← Editor logic
+│   ├── state/        ← State management
+│   └── primitives/   ← Math utilities
+└── apps/
+    └── www/          ← Demo app
 ```
 
-Prefixes:
-- `feat:` - New feature
-- `fix:` - Bug fix
-- `docs:` - Documentation only
-- `perf:` - Performance improvement
-- `refactor:` - Code refactoring
-- `style:` - Code style changes
-- `test:` - Adding tests
-- `chore:` - Maintenance tasks
+## 🎯 Areas to Contribute
 
-### Pull Request Process
+### 🌟 Good First Issues
 
-1. Ensure your code builds without errors:
-   ```bash
-   npm run build
-   ```
+- Add new toolbar icons/tools
+- Improve error messages
+- Add TypeScript documentation
+- Write usage examples
+- Fix bugs
 
-2. Update documentation if needed
+### 🚀 Feature Contributions
 
-3. Push to your fork:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
+- Add new tools (text, draw, shapes)
+- Implement video support
+- Add export functionality (PNG, SVG)
+- Improve mobile support
+- Add keyboard shortcuts
 
-4. Create a Pull Request on GitHub:
-   - Use a clear, descriptive title
-   - Describe what changes you made and why
-   - Reference any related issues
-   - Include screenshots/GIFs for UI changes
+### 📖 Documentation
 
-5. Wait for review and address feedback
+- Improve README examples
+- Add JSDoc comments
+- Create tutorials
+- Record demo videos
 
-### Pull Request Checklist
+### 🐛 Bug Fixes
 
-- [ ] Code follows project style guidelines
-- [ ] Self-reviewed the code
-- [ ] Added/updated documentation
-- [ ] Tested on multiple browsers
-- [ ] No console errors or warnings
-- [ ] Performance is acceptable
+- Fix reported issues
+- Improve error handling
+- Optimize performance
+- Fix edge cases
 
-## Reporting Issues
+## 🔄 Development Workflow
 
-### Bug Reports
+### 1. Create a Branch
+```bash
+git checkout -b feature/your-feature-name
+# or
+git checkout -b fix/bug-description
+```
 
-Include:
-- Browser and OS version
-- Steps to reproduce
-- Expected vs actual behavior
-- Screenshots/videos if applicable
-- Console errors if any
+### 2. Make Changes
 
-### Feature Requests
+**For React SDK changes** (`packages/cloudgrid`):
+```bash
+cd packages/cloudgrid
+npm run dev  # Watch mode - auto rebuild
+```
 
-Include:
-- Clear description of the feature
-- Use case / why it's needed
-- Possible implementation approach
-- Mockups/wireframes if applicable
+**For WASM changes** (`packages/wasm`):
+```bash
+cd packages/wasm
+npm run build
+cd ../../packages/cloudgrid
+npm run build
+```
 
-## Areas for Contribution
+### 3. Test Your Changes
+```bash
+cd apps/www
+npm run dev
+# Test in browser
+```
 
-### Good First Issues
+### 4. Commit Your Changes
+```bash
+git add .
+git commit -m "feat: add new feature"
+# or
+git commit -m "fix: resolve bug"
+```
 
-- UI/UX improvements
-- Documentation updates
-- Bug fixes
-- Code cleanup
+**Commit Message Convention:**
+- `feat:` New feature
+- `fix:` Bug fix
+- `docs:` Documentation changes
+- `perf:` Performance improvements
+- `refactor:` Code refactoring
+- `test:` Add tests
+- `chore:` Maintenance tasks
 
-### Advanced Contributions
+### 5. Push and Create PR
+```bash
+git push origin feature/your-feature-name
+```
 
-- WASM performance optimizations
-- New canvas tools
-- Multi-user collaboration
-- Plugin system
-- Mobile optimizations
+Then create a Pull Request on GitHub.
 
-## Questions?
+## ✅ PR Checklist
 
-- Open a GitHub Discussion for questions
-- Check existing issues and discussions first
-- Be patient - maintainers are volunteers
+Before submitting your PR:
 
-## License
+- [ ] Code builds successfully (`npm run build`)
+- [ ] No TypeScript errors (`npm run typecheck`)
+- [ ] No linting errors (`npm run lint`)
+- [ ] Demo app works (`npm run dev` in apps/www)
+- [ ] Added/updated documentation if needed
+- [ ] Added examples if adding new features
+- [ ] Tested with 2000+ items (performance)
+- [ ] Commit messages follow convention
+
+## 🎨 Code Style
+
+### TypeScript
+- Use TypeScript for all new code
+- Avoid `any` types
+- Export types for public APIs
+- Add JSDoc comments for public functions
+
+### React
+- Use functional components with hooks
+- Memoize expensive computations (`useMemo`, `useCallback`)
+- Use `memo()` for expensive components
+- Avoid inline object/function creation in renders
+
+### Naming
+- Components: `PascalCase` (e.g., `Canvas.tsx`)
+- Hooks: `use` prefix (e.g., `useCamera`)
+- Files: `kebab-case` or `PascalCase`
+- Constants: `UPPER_SNAKE_CASE`
+
+## 🧪 Testing (TODO)
+
+Currently, we don't have automated tests, but we welcome contributions to add them!
+
+**Future testing stack:**
+- Unit tests: Vitest
+- React tests: React Testing Library
+- E2E tests: Playwright
+
+## 📝 Documentation Guidelines
+
+### Code Comments
+```typescript
+/**
+ * Normalize item heights while maintaining aspect ratios.
+ * 
+ * @param itemIds - Optional array of item IDs to normalize
+ * @param targetHeight - Optional target height (calculated if not provided)
+ * @returns The average height used for normalization
+ * 
+ * @example
+ * ```typescript
+ * // Normalize all items
+ * const avgHeight = normalizeItemHeights();
+ * 
+ * // Normalize specific items
+ * normalizeItemHeights([1, 2, 3], 350);
+ * ```
+ */
+function normalizeItemHeights(itemIds?: number[], targetHeight?: number): number {
+  // ...
+}
+```
+
+### README Examples
+- Keep examples simple and focused
+- Show both basic and advanced usage
+- Include expected behavior
+- Use real-world scenarios
+
+## 🚨 Common Pitfalls
+
+### 1. Forgetting to Sync WASM → React
+```typescript
+// ❌ BAD
+wasm.moveObject(id, x, y);
+// React state is now out of sync!
+
+// ✅ GOOD
+wasm.moveObject(id, x, y);
+syncFromWasm(wasm);  // Sync state
+```
+
+### 2. Not Using Batch Operations
+```typescript
+// ❌ BAD: Creates 2000 undo entries
+for (let i = 0; i < 2000; i++) {
+  wasm.resizeObject(...);
+}
+
+// ✅ GOOD: Creates 20 undo entries
+const BATCH_SIZE = 100;
+for (let i = 0; i < items.length; i += BATCH_SIZE) {
+  wasm.beginBatchResize();
+  // ... process batch
+  wasm.endBatchResize();
+}
+```
+
+### 3. Not Memoizing Computations
+```typescript
+// ❌ BAD: Recalculates every render
+const visibleImages = images.filter(img => isInViewport(img, bounds));
+
+// ✅ GOOD: Only recalculates when dependencies change
+const visibleImages = useMemo(() => 
+  images.filter(img => isInViewport(img, bounds)),
+  [images, bounds]
+);
+```
+
+### 4. Creating Objects in Render
+```typescript
+// ❌ BAD: Creates new object every render → infinite loop
+<Component style={{ color: 'red' }} />
+
+// ✅ GOOD: Define outside or use useMemo
+const style = useMemo(() => ({ color: 'red' }), []);
+<Component style={style} />
+```
+
+## 🆘 Getting Help
+
+- **Issues**: [GitHub Issues](https://github.com/Rhitottam/convadraw/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Rhitottam/convadraw/discussions)
+- **Email**: support@cloudgrid.dev
+
+## 📄 License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
+
+---
+
+Thank you for contributing to CloudGrid! 🎉

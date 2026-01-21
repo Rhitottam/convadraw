@@ -11,6 +11,7 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   minify: false,
+  splitting: true,
   treeshake: true,
   external: ['react', 'react-dom', 'konva', 'react-konva'],
   esbuildOptions(options) {

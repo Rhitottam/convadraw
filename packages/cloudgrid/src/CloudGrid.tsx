@@ -9,11 +9,11 @@ import React, {
     type ReactNode,
 } from 'react'
 import { CameraProvider } from './CameraContext'
-import { Canvas } from './Canvas'
 import { CloudGridContext } from './CloudGridContext'
 import { CompactToolbar, type ToolbarPosition } from './CompactToolbar'
 import { StatsPanel, type PanelPosition } from './StatsPanel'
 import { WasmProvider } from './WasmContext'
+import { Canvas } from './components'
 import { syncFromWasm } from './hooks/useCanvasStore'
 import { loadWASM, type WASMExports } from './utils/wasmLoader'
 

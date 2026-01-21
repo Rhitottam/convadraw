@@ -1,7 +1,7 @@
 import type { ToolType } from '@convadraw/state'
 import Konva from 'konva'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Image as KonvaImage, Layer, Rect, Stage, Transformer } from 'react-konva'
+import { Layer, Rect, Stage, Transformer } from 'react-konva'
 import { useCamera } from './CameraContext'
 import { updateCameraState } from './hooks/useCameraState'
 import {
@@ -14,395 +14,23 @@ import {
   useUndoRedoShortcuts,
 } from './hooks/useCanvasStore'
 import { getGroupSnapOffset, snapDimensionsToGrid, snapToGrid } from './lib/grid-utils'
-import type { CanvasImage } from './types/canvas'
+import { getImageWorker, imageColors, requestBlobCache } from './lib/imageLoading'
 import type { WASMExports } from './utils/wasmLoader'
 
-// Import workers
-import { createGridWorker, createImageLoaderWorker } from './workers/createWorker'
+// Import components
+import { CanvasImageNode } from './components/CanvasImageNode'
+import { MAX_SIZE_MULTIPLIER, MIN_SIZE_MULTIPLIER, type SelectionRect } from './components/constants'
+import { GridLayer } from './components/GridLayer'
+
+// Import Hammer.js for touch gestures
+import Hammer from './lib/hammer'
+import TouchEmulator from './lib/touch-emulator'
 
 interface CanvasProps {
   wasm: WASMExports | null;
   activeTool: ToolType;
   gridSize: number;
   onStatsUpdate: (visible: number, total: number, fps: number) => void;
-}
-
-// Resize limits (as multipliers of gridSize)
-const MIN_SIZE_MULTIPLIER = 2;
-const MAX_SIZE_MULTIPLIER = 200;
-
-// ============= Memory-Efficient Image Loading with LOD =============
-// Worker caches compressed blobs (~100-200KB each)
-// Main thread only holds decoded bitmaps for VISIBLE images
-// Bitmaps are re-decoded at appropriate resolution when zoom/size changes
-// Bitmaps are closed when images leave viewport
-
-// Resolution levels - same URL decoded at different sizes
-const LOD_LEVELS = {
-  small: 150,   // For thumbnails / zoomed out
-  medium: 400,  // For normal view
-  full: 0,      // 0 = original resolution
-} as const;
-
-type LODLevel = keyof typeof LOD_LEVELS;
-
-// Track which blobs are cached in the worker
-const cachedBlobs = new Set<string>();
-const loadingBlobs = new Set<string>();
-
-// Track decoded bitmaps with their current LOD level
-interface DecodedEntry {
-  bitmap: ImageBitmap;
-  level: LODLevel;
-}
-const decodedBitmaps = new Map<string, DecodedEntry>();
-const decodingImages = new Map<string, LODLevel>(); // Track what level is being decoded
-
-// Color data for sorting
-interface ImageColor {
-  r: number;
-  g: number;
-  b: number;
-}
-const imageColors = new Map<string, ImageColor>();
-
-let imageWorker: Worker | null = null;
-
-// Determine which LOD level to use based on display size
-function getLODLevel(displayWidth: number, displayHeight: number): LODLevel {
-  const maxDim = Math.max(displayWidth, displayHeight);
-  if (maxDim <= 150) return 'small';
-  if (maxDim <= 400) return 'medium';
-  return 'full';
-}
-
-function getImageWorker(): Worker {
-  if (!imageWorker) {
-    imageWorker = createImageLoaderWorker()
-    imageWorker.onmessage = (e) => {
-      const { type, id, bitmap, requestedMaxDim, color } = e.data;
-      
-      if (type === 'cached') {
-        // Blob is now cached in worker, ready for decode
-        cachedBlobs.add(id);
-        loadingBlobs.delete(id);
-        
-        // Store color data for sorting
-        if (color) {
-          imageColors.set(id, color);
-          window.dispatchEvent(new CustomEvent('image-color-ready', { detail: { id, color } }));
-        }
-        
-        window.dispatchEvent(new CustomEvent('blob-cached', { detail: { id } }));
-      } else if (type === 'decoded' && bitmap) {
-        // Determine which level this decode was for
-        const level = decodingImages.get(id) || 
-          (requestedMaxDim === 150 ? 'small' : requestedMaxDim === 400 ? 'medium' : 'full');
-        decodingImages.delete(id);
-        
-        // Close any existing bitmap for this id
-        const existing = decodedBitmaps.get(id);
-        if (existing) {
-          try { existing.bitmap.close(); } catch { /* ignore */ }
-        }
-        
-        decodedBitmaps.set(id, { bitmap, level });
-        window.dispatchEvent(new CustomEvent('image-decoded', { detail: { id, level } }));
-      } else if (type === 'error') {
-        loadingBlobs.delete(id);
-        decodingImages.delete(id);
-      }
-    };
-  }
-  return imageWorker;
-}
-
-// Request blob to be cached (fast, no limit on concurrent requests)
-function requestBlobCache(src: string): void {
-  if (cachedBlobs.has(src) || loadingBlobs.has(src)) return;
-  loadingBlobs.add(src);
-  const worker = getImageWorker();
-  worker.postMessage({ type: 'load', id: src, src });
-}
-
-// Request decode of a cached blob at specific LOD level
-function requestDecode(src: string, level: LODLevel): void {
-  if (!cachedBlobs.has(src)) return;
-  
-  // Skip if already decoding at this or higher level
-  const currentlyDecoding = decodingImages.get(src);
-  if (currentlyDecoding) {
-    // If we're already decoding at a higher quality level, don't downgrade
-    const levels: LODLevel[] = ['small', 'medium', 'full'];
-    if (levels.indexOf(currentlyDecoding) >= levels.indexOf(level)) return;
-  }
-  
-  decodingImages.set(src, level);
-  const worker = getImageWorker();
-  const maxDim = LOD_LEVELS[level];
-  worker.postMessage({ type: 'decode', id: src, maxDim });
-}
-
-// Release a bitmap when image is no longer visible
-function releaseBitmap(src: string): void {
-  const entry = decodedBitmaps.get(src);
-  if (entry) {
-    try { entry.bitmap.close(); } catch { /* ignore */ }
-    decodedBitmaps.delete(src);
-  }
-  decodingImages.delete(src);
-}
-
-// Hook for on-demand image loading with LOD support
-function useImageOnDemand(
-  src: string,
-  displayWidth: number,
-  displayHeight: number,
-  isVisible: boolean
-): ImageBitmap | undefined {
-  const [, forceUpdate] = useState(0);
-  const neededLevel = getLODLevel(displayWidth, displayHeight);
-
-  // Start loading blob and decode when visible
-  useEffect(() => {
-    if (!isVisible) return;
-    
-    // Request blob cache
-    requestBlobCache(src);
-    
-    const handleCached = (e: CustomEvent) => {
-      if (e.detail.id === src) {
-        // Blob cached, now request decode at needed level
-        requestDecode(src, neededLevel);
-      }
-    };
-    
-    const handleDecoded = (e: CustomEvent) => {
-      if (e.detail.id === src) {
-        forceUpdate((n) => n + 1);
-      }
-    };
-    
-    window.addEventListener('blob-cached', handleCached as EventListener);
-    window.addEventListener('image-decoded', handleDecoded as EventListener);
-    
-    // If blob already cached, check if we need to decode/upgrade
-    if (cachedBlobs.has(src)) {
-      const existing = decodedBitmaps.get(src);
-      if (!existing) {
-        // No bitmap yet, request decode
-        requestDecode(src, neededLevel);
-      } else {
-        // Check if we need a higher resolution
-        const levels: LODLevel[] = ['small', 'medium', 'full'];
-        const currentIdx = levels.indexOf(existing.level);
-        const neededIdx = levels.indexOf(neededLevel);
-        if (neededIdx > currentIdx && !decodingImages.has(src)) {
-          // Need higher resolution, request upgrade
-          requestDecode(src, neededLevel);
-        }
-      }
-    }
-    
-    return () => {
-      window.removeEventListener('blob-cached', handleCached as EventListener);
-      window.removeEventListener('image-decoded', handleDecoded as EventListener);
-    };
-  }, [src, isVisible, neededLevel]);
-
-  // Release bitmap when no longer visible
-  useEffect(() => {
-    if (!isVisible) {
-      releaseBitmap(src);
-    }
-  }, [src, isVisible]);
-
-  const entry = decodedBitmaps.get(src);
-  return isVisible ? entry?.bitmap : undefined;
-}
-
-// Selection rectangle for rubber band selection
-interface SelectionRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-// Individual image component
-interface CanvasImageNodeProps {
-  image: CanvasImage;
-  isSelected: boolean;
-  onSelect: (shiftKey: boolean) => void;
-  onDragStart: () => void;
-  onDragMove: (id: string, x: number, y: number) => void;
-  onDragEnd: (id: string, newX: number, newY: number) => void;
-  activeTool: ToolType;
-  scale: number;
-  nodeRef?: (node: Konva.Image | null) => void;
-}
-
-function CanvasImageNode({
-  image,
-  isSelected,
-  onSelect,
-  onDragStart,
-  onDragMove,
-  onDragEnd,
-  activeTool,
-  scale,
-  nodeRef,
-}: CanvasImageNodeProps) {
-  const shapeRef = useRef<Konva.Image>(null);
-
-  const displayWidth = image.width * scale;
-  const displayHeight = image.height * scale;
-
-  // isVisible is always true since this component is only rendered for visible images
-  const bitmap = useImageOnDemand(image.src, displayWidth, displayHeight, true);
-
-  useEffect(() => {
-    if (nodeRef) nodeRef(shapeRef.current);
-  }, [nodeRef, bitmap]);
-
-  const handleClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (activeTool === 'select') {
-      onSelect(e.evt.shiftKey);
-    }
-  };
-
-  const handleDragStart = () => {
-    onDragStart();
-  };
-
-  const handleDragMove = (e: Konva.KonvaEventObject<DragEvent>) => {
-    const node = e.target;
-    onDragMove(image.id, node.x(), node.y());
-  };
-
-  const handleDragEnd = (e: Konva.KonvaEventObject<DragEvent>) => {
-    const node = e.target;
-    onDragEnd(image.id, node.x(), node.y());
-  };
-
-  const isDraggable = activeTool === 'select';
-
-  if (!bitmap) {
-    return (
-      <Rect
-        x={image.x}
-        y={image.y}
-        width={image.width}
-        height={image.height}
-        fill="rgba(100, 100, 100, 0.3)"
-        stroke={isSelected ? '#4ade80' : 'rgba(150, 150, 150, 0.5)'}
-        strokeWidth={isSelected ? 2 : 1}
-        draggable={isDraggable}
-        onClick={handleClick}
-        onDragStart={handleDragStart}
-        onDragMove={handleDragMove}
-        onDragEnd={handleDragEnd}
-      />
-    );
-  }
-
-  return (
-    <KonvaImage
-      ref={shapeRef}
-      id={image.id}
-      image={bitmap}
-      x={image.x}
-      y={image.y}
-      width={image.width}
-      height={image.height}
-      draggable={isDraggable}
-      onClick={handleClick}
-      onTap={() => onSelect(false)}
-      onDragStart={handleDragStart}
-      onDragMove={handleDragMove}
-      onDragEnd={handleDragEnd}
-      stroke={isSelected ? '#4ade80' : undefined}
-      strokeWidth={isSelected ? 2 / scale : 0}
-    />
-  );
-}
-
-// Grid layer
-interface GridLayerProps {
-  width: number;
-  height: number;
-  gridSize: number;
-  stageX: number;
-  stageY: number;
-  scale: number;
-}
-
-function GridLayer({ width, height, gridSize, stageX, stageY, scale }: GridLayerProps) {
-  const [gridBitmap, setGridBitmap] = useState<ImageBitmap | null>(null);
-  const workerRef = useRef<Worker | null>(null);
-  const pendingRef = useRef(false);
-  const lastParamsRef = useRef({ width: 0, height: 0, gridSize: 0, stageX: 0, stageY: 0, scale: 1 });
-
-  const throttledParams = useMemo(
-    () => ({
-      width,
-      height,
-      gridSize,
-      stageX: Math.round(stageX / 5) * 5,
-      stageY: Math.round(stageY / 5) * 5,
-      scale: Math.round(scale * 100) / 100,
-    }),
-    [width, height, gridSize, Math.round(stageX / 5), Math.round(stageY / 5), Math.round(scale * 100)]
-  );
-
-  useEffect(() => {
-    if (!workerRef.current) {
-      workerRef.current = createGridWorker()
-      workerRef.current.onmessage = (e) => {
-        if (e.data.type === 'rendered' && e.data.bitmap) {
-          setGridBitmap(e.data.bitmap);
-          pendingRef.current = false;
-        }
-      };
-    }
-
-    const last = lastParamsRef.current;
-    if (
-      last.width === throttledParams.width &&
-      last.height === throttledParams.height &&
-      last.gridSize === throttledParams.gridSize &&
-      last.stageX === throttledParams.stageX &&
-      last.stageY === throttledParams.stageY &&
-      last.scale === throttledParams.scale
-    )
-      return;
-
-    lastParamsRef.current = { ...throttledParams };
-    if (pendingRef.current || !workerRef.current) return;
-
-    pendingRef.current = true;
-    workerRef.current.postMessage({ type: 'render', ...throttledParams });
-  }, [throttledParams]);
-
-  useEffect(
-    () => () => {
-      workerRef.current?.terminate();
-    },
-    []
-  );
-
-  if (!gridBitmap) return null;
-
-  return (
-    <KonvaImage
-      image={gridBitmap}
-      x={-stageX / scale}
-      y={-stageY / scale}
-      width={width / scale}
-      height={height / scale}
-      listening={false}
-    />
-  );
 }
 
 export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStatsUpdate }: CanvasProps) {
@@ -425,13 +53,26 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   const imageNodesRef = useRef<Map<string, Konva.Image | null>>(new Map());
   
   // Color sorting state
-  const colorSortedRef = useRef(false);
   const [colorsLoaded, setColorsLoaded] = useState(0);
   const totalImagesRef = useRef(0);
+
+  // Refs and state for gesture handling
+  const activeToolRef = useRef<ToolType>(activeTool);
+  const [isPinching, setIsPinching] = useState(false);
+  const isPinchingRef = useRef(false); // Keep a ref in sync for use in callbacks
 
   // WASM-backed state
   const { images, stateVersion } = useCanvasStore();
   const { moveObject, resizeObject, batchMoveObjects, batchResizeObjects, deleteObject, deleteObjects } = useCanvasActions(wasm);
+
+  // Keep refs in sync with props and state
+  useEffect(() => {
+    activeToolRef.current = activeTool;
+  }, [activeTool]);
+
+  useEffect(() => {
+    isPinchingRef.current = isPinching;
+  }, [isPinching]);
 
   // Force re-render of visible images and selection when state version changes
   useEffect(() => {
@@ -560,6 +201,118 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     }
   }, [wasm, dimensions.width, dimensions.height, gridSize]);
 
+  useEffect(() => {
+    activeToolRef.current = activeTool;
+  }, [activeTool]);
+
+  // Initialize Hammer.js for touch gestures
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    // Enable touch emulator for desktop testing (Shift key to emulate touch)
+    if (process.env.NODE_ENV === 'development') {
+      try {
+        TouchEmulator();
+      } catch (e) {
+        console.warn('TouchEmulator already initialized');
+      }
+    }
+
+    // Set Konva flags for gesture support
+    Konva.hitOnDragEnabled = true;
+    Konva.capturePointerEventsEnabled = true;
+
+    // Initialize Hammer with domEvents option for Konva compatibility
+    const hammer = new Hammer(stage, { domEvents: false });
+    hammerRef.current = hammer;
+
+    // Enable pinch gesture
+    hammer.get('pinch').set({ enable: true });
+    hammer.get('pan').set({ direction: Hammer.DIRECTION_ALL, threshold: 0 });
+
+    // Handle pan gesture (replaces draggable stage)
+    let panStartPos: { x: number; y: number } | null = null;
+    
+    hammer.on('panstart', (e: any) => {
+      panStartPos = e.target?.attrs ? { x: e.target.attrs.x, y: e.target.attrs.y } : null;
+    });
+    hammer.on('pan', (e: any) => {
+      if (activeToolRef.current !== 'pan') return;
+      if (!panStartPos) {
+        panStartPos = e.target?.attrs ? { x: e.target.attrs.x, y: e.target.attrs.y } : null;
+        return;
+      };
+
+      const delta = {
+        x: isNaN(e.deltaX) ? 0 : e.deltaX,
+        y: isNaN(e.deltaY) ? 0 : e.deltaY,
+      };
+      
+      setStagePos({
+        x: panStartPos.x + delta.x,
+        y: panStartPos.y + delta.y,
+      });
+    });
+    hammer.on('panend', () => {
+      panStartPos = null;
+      console.log('panend', panStartPos);
+    });
+
+    // Handle pinch gesture (zoom)
+    let pinchStartScale = 1;
+    let pinchStartPos: { x: number; y: number } | null = null;
+    let pinchCenter = { x: 0, y: 0 };
+
+    hammer.on('pinchstart', (e: any) => {
+      console.log('pinchstart');
+      setIsPinching(true); // Update state to disable draggable
+      isPinchingRef.current = true; // Update ref for immediate access in callbacks
+      pinchStartScale = e.target.attrs.scaleX;
+      pinchStartPos = { x: e.target.attrs.x, y: e.target.attrs.y };
+      // Get pinch center in stage coordinates
+      const stageBox = stage.container().getBoundingClientRect();
+      pinchCenter = {
+        x: e.center.x - stageBox.left,
+        y: e.center.y - stageBox.top,
+      };
+    });
+
+    hammer.on('pinchmove', (e: any) => {
+      if(!pinchStartPos) {
+        pinchStartPos = e.target?.attrs ? { x: e.target.attrs.x, y: e.target.attrs.y } : null;
+        return;
+      };
+      const newScale = Math.max(0.1, Math.min(10, pinchStartScale * e.scale));
+      
+      // Calculate zoom point
+      const mousePointTo = {
+        x: (pinchCenter.x - pinchStartPos.x) / pinchStartScale,
+        y: (pinchCenter.y - pinchStartPos.y) / pinchStartScale,
+      };
+
+      setScale(newScale);
+      setStagePos({
+        x: pinchCenter.x - mousePointTo.x * newScale,
+        y: pinchCenter.y - mousePointTo.y * newScale,
+      });
+    });
+
+    hammer.on('pinchend', () => {
+      console.log('pinchend');
+      pinchStartPos = null;
+      setIsPinching(false); // Update state to re-enable draggable
+      isPinchingRef.current = false; // Update ref for immediate access in callbacks
+    });
+
+    return () => {
+      if (hammerRef.current) {
+        hammerRef.current.destroy();
+        hammerRef.current = null;
+      }
+    };
+  }, []); // Re-initialize when scale/pos change to capture latest values
+
   // FPS counter
   useEffect(() => {
     const updateStats = (time: number) => {
@@ -647,7 +400,17 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     if (itemData.length === 0) return avgHeight;
     
     // Calculate new dimensions for each item
-    const resizes: Array<{ id: number; x: number; y: number; width: number; height: number }> = [];
+    const resizes: Array<{ 
+      id: number; 
+      oldX: number; 
+      oldY: number; 
+      oldWidth: number; 
+      oldHeight: number;
+      newX: number; 
+      newY: number; 
+      newWidth: number; 
+      newHeight: number 
+    }> = [];
     
     itemData.forEach(item => {
       const aspectRatio = item.width / item.height;
@@ -659,7 +422,17 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
       
       // Only resize if dimensions actually changed
       if (newWidth !== item.width || newHeight !== item.height) {
-        resizes.push({ id: item.id, x: item.x, y: item.y, width: newWidth, height: newHeight });
+        resizes.push({ 
+          id: item.id, 
+          oldX: item.x, 
+          oldY: item.y, 
+          oldWidth: item.width, 
+          oldHeight: item.height,
+          newX: item.x, 
+          newY: item.y, 
+          newWidth, 
+          newHeight 
+        });
       }
     });
     
@@ -673,7 +446,17 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
         
         wasm.beginBatchResize();
         batch.forEach(resize => {
-          wasm.addToBatchResize(resize.id, resize.x, resize.y, resize.width, resize.height);
+          wasm.addToBatchResize(
+            resize.id, 
+            resize.oldX, 
+            resize.oldY, 
+            resize.oldWidth, 
+            resize.oldHeight,
+            resize.newX, 
+            resize.newY, 
+            resize.newWidth, 
+            resize.newHeight
+          );
         });
         wasm.endBatchResize();
       }
@@ -1119,6 +902,7 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
 
   // Handle image selection
   const handleImageSelect = useCallback((id: string, shiftKey: boolean) => {
+    if (isPinchingRef.current) return;
     if (shiftKey) {
       setSelectedIds((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]));
     } else {
@@ -1131,6 +915,8 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
 
   // Handle drag start
   const handleDragStart = useCallback(() => {
+    if (isPinchingRef.current) return;
+    console.log('dragstart', hammerRef.current);
     const positions = new Map<string, { x: number; y: number }>();
     selectedIds.forEach((id) => {
       const img = images.find((i) => i.id === id);
@@ -1144,6 +930,8 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   // Handle drag move - sync other selected items
   const handleDragMove = useCallback(
     (draggedId: string, newX: number, newY: number) => {
+      if (isPinchingRef.current) return;
+      console.log('dragmove', hammerRef.current);
       if (!dragInitialPositionsRef.current || selectedIds.length <= 1) return;
       if (!selectedIds.includes(draggedId)) return;
 
@@ -1170,6 +958,7 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   // Handle drag end - commit to WASM
   const handleDragEnd = useCallback(
     (draggedId: string, newX: number, newY: number) => {
+      if (isPinchingRef.current) return;
       if (!wasm) return;
 
       // For group selections, only process the first onDragEnd event
@@ -1245,6 +1034,7 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     (e: Konva.KonvaEventObject<PointerEvent>) => {
       if (activeTool !== 'select') return;
       if (e.target !== e.target.getStage()) return;
+      if (isPinchingRef.current) return;
 
       const stage = stageRef.current;
       if (!stage) return;
@@ -1371,69 +1161,10 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     [scale, stagePos]
   );
 
-  // Handle touch gestures (pinch-to-zoom)
-  const lastTouchDistanceRef = useRef<number>(0);
-  
-  const handleTouchMove = useCallback(
-    (e: Konva.KonvaEventObject<TouchEvent>) => {
-      e.evt.preventDefault();
-      const touch1 = e.evt.touches[0];
-      const touch2 = e.evt.touches[1];
+  // Hammer.js gesture manager ref
+  const hammerRef = useRef<any>(null);
 
-      if (touch1 && touch2) {
-        // Pinch gesture detected
-        const stage = stageRef.current;
-        if (!stage) return;
 
-        const dist = Math.hypot(
-          touch2.clientX - touch1.clientX,
-          touch2.clientY - touch1.clientY
-        );
-
-        if (lastTouchDistanceRef.current > 0) {
-          const delta = dist / lastTouchDistanceRef.current;
-          const oldScale = scale;
-          const newScale = oldScale * delta;
-          const clampedScale = Math.max(0.1, Math.min(10, newScale));
-
-          // Get center point between two touches
-          const centerX = (touch1.clientX + touch2.clientX) / 2;
-          const centerY = (touch1.clientY + touch2.clientY) / 2;
-
-          const rect = stage.container().getBoundingClientRect();
-          const pointer = {
-            x: centerX - rect.left,
-            y: centerY - rect.top,
-          };
-
-          const mousePointTo = {
-            x: (pointer.x - stagePos.x) / oldScale,
-            y: (pointer.y - stagePos.y) / oldScale,
-          };
-
-          setScale(clampedScale);
-          setStagePos({
-            x: pointer.x - mousePointTo.x * clampedScale,
-            y: pointer.y - mousePointTo.y * clampedScale,
-          });
-        }
-
-        lastTouchDistanceRef.current = dist;
-      }
-    },
-    [scale, stagePos]
-  );
-
-  const handleTouchEnd = useCallback(() => {
-    lastTouchDistanceRef.current = 0;
-  }, []);
-
-  // Handle stage drag
-  const handleStageDragEnd = useCallback((e: Konva.KonvaEventObject<DragEvent>) => {
-    if (e.target === e.target.getStage()) {
-      setStagePos({ x: e.target.x(), y: e.target.y() });
-    }
-  }, []);
 
   // Handle transform end - commit resize to WASM
   const handleTransformEnd = useCallback(
@@ -1530,16 +1261,12 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
         y={stagePos.y}
         scaleX={scale}
         scaleY={scale}
-        draggable={activeTool === 'pan'}
         onClick={handleStageClick}
         onTap={handleStageClick}
         onWheel={handleWheel}
-        onDragEnd={handleStageDragEnd}
         onPointerDown={handleStageMouseDown}
         onPointerMove={handleStageMouseMove}
         onPointerUp={handleStageMouseUp}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
         style={{ backgroundColor: 'oklch(0.09 0.01 255)' }}
       >
         {/* Grid layer */}
@@ -1567,6 +1294,7 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
               onDragEnd={handleDragEnd}
               activeTool={activeTool}
               scale={scale}
+              isPinching={isPinching}
               nodeRef={(node) => {
                 if (node) imageNodesRef.current.set(img.id, node);
                 else imageNodesRef.current.delete(img.id);

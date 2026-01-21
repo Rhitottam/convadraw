@@ -13,7 +13,10 @@ export interface CameraControls {
   
   // Setters
   setScale: (scale: number) => void
-  setStagePos: (pos: { x: number; y: number }) => void
+  setStagePos: React.Dispatch<React.SetStateAction<{
+        x: number;
+        y: number;
+    }>>
   
   // High-level actions
   zoom: (factor: number, centerX?: number, centerY?: number) => void
@@ -62,9 +65,9 @@ export function CameraProvider({ wasm, children }: CameraProviderProps) {
     syncToWASM(newScale, stagePos)
   }, [stagePos, syncToWASM])
 
-  const setStagePos = useCallback((newPos: { x: number; y: number }) => {
-    setStagePosState(newPos)
-    syncToWASM(scale, newPos)
+  const setStagePos = useCallback((newPos: { x: number; y: number } | React.SetStateAction<{ x: number; y: number; }>) => {
+    setStagePosState(typeof newPos === 'function' ? newPos(stagePos) : newPos)
+    syncToWASM(scale, typeof newPos === 'function' ? newPos(stagePos) : newPos)
   }, [scale, syncToWASM])
 
   const zoom = useCallback(

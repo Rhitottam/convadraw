@@ -20,6 +20,74 @@ type WorkerMessage = LoadMessage | DecodeMessage;
 const blobCache = new Map<string, Blob>();
 const loadingSet = new Set<string>();
 
+// Track pending decode requests - keeps highest resolution request per image
+const pendingDecodes = new Map<string, { maxDim: number; timestamp: number }>();
+const decodingSet = new Set<string>();
+
+// Process a decode request
+async function processDecode(id: string, maxDim: number) {
+  const blob = blobCache.get(id);
+  if (!blob) {
+    (self as unknown as Worker).postMessage({ type: 'error', id, error: 'Blob not cached' });
+    return;
+  }
+  
+  // If already decoding this image, update to request higher resolution
+  if (decodingSet.has(id)) {
+    const existing = pendingDecodes.get(id);
+    if (!existing || maxDim > existing.maxDim) {
+      // Store higher resolution request
+      pendingDecodes.set(id, { maxDim, timestamp: Date.now() });
+    }
+    return; // Skip, will be processed after current decode completes
+  }
+  
+  // Mark as decoding
+  decodingSet.add(id);
+  const requestTimestamp = Date.now();
+  
+  try {
+    // Decode blob to ImageBitmap at requested size
+    const bitmap = await decodeAndScale(blob, maxDim);
+    
+    // Check if a newer request superseded this one
+    const pending = pendingDecodes.get(id);
+    if (pending && pending.timestamp > requestTimestamp) {
+      // Discard this bitmap, process the newer request
+      bitmap.close();
+      decodingSet.delete(id);
+      
+      const newerMaxDim = pending.maxDim;
+      pendingDecodes.delete(id);
+      
+      // Re-dispatch the newer decode request
+      await processDecode(id, newerMaxDim);
+      return;
+    }
+    
+    // No superseding request - send the bitmap
+    decodingSet.delete(id);
+    pendingDecodes.delete(id);
+    
+    // Transfer bitmap to main thread with requested resolution info
+    (self as unknown as Worker).postMessage(
+      { 
+        type: 'decoded', 
+        id, 
+        bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        requestedMaxDim: maxDim, // Include what was requested for LOD tracking
+      }, 
+      [bitmap]
+    );
+  } catch (error) {
+    decodingSet.delete(id);
+    pendingDecodes.delete(id);
+    (self as unknown as Worker).postMessage({ type: 'error', id, error: String(error) });
+  }
+}
+
 // Extract average RGB from an ImageBitmap by sampling pixels
 async function extractAverageColor(bitmap: ImageBitmap): Promise<{ r: number; g: number; b: number }> {
   // Use a small canvas for sampling (faster than full resolution)
@@ -146,32 +214,7 @@ self.onmessage = async (e: MessageEvent<WorkerMessage>) => {
   } 
   else if (type === 'decode') {
     const { maxDim } = e.data as DecodeMessage;
-    
-    const blob = blobCache.get(id);
-    if (!blob) {
-      (self as unknown as Worker).postMessage({ type: 'error', id, error: 'Blob not cached' });
-      return;
-    }
-    
-    try {
-      // Decode blob to ImageBitmap at requested size
-      const bitmap = await decodeAndScale(blob, maxDim);
-      
-      // Transfer bitmap to main thread with requested resolution info
-      (self as unknown as Worker).postMessage(
-        { 
-          type: 'decoded', 
-          id, 
-          bitmap,
-          width: bitmap.width,
-          height: bitmap.height,
-          requestedMaxDim: maxDim, // Include what was requested for LOD tracking
-        }, 
-        [bitmap]
-      );
-    } catch (error) {
-      (self as unknown as Worker).postMessage({ type: 'error', id, error: String(error) });
-    }
+    processDecode(id, maxDim);
   }
 };
 
