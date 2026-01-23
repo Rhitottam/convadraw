@@ -5,6 +5,57 @@ All notable changes to CloudGrid will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - 2026-01-23
+
+### 🎨 Major UI/UX Improvements
+
+#### Masonry Grid Layout for Color Sorting
+- **Variable Width Layout**: Images now have fixed height but variable width based on aspect ratio
+- **Better Space Utilization**: No wasted space, natural organic layout
+- **Fixed Gaps**: Consistent spacing between all images
+- **Centered Rows**: Each row centered horizontally for visual balance
+- **Group Sorting Support**: Sort selected images or all images
+- **Contextual Positioning**: Group sorts appear below existing content, all-images sorts are centered
+
+### 🔄 Refactored
+
+#### Asset Metadata System (Breaking Change for Internal APIs)
+- **Indexed by Asset ID**: Metadata now properly indexed by asset ID instead of src URL
+- **Multiple Registries**: Added registries for bidirectional ID lookups
+  - `assetMetadataRegistry`: assetId → metadata
+  - `numericToStringIdRegistry`: numericId → assetStringId
+  - `srcToAssetIdsRegistry`: src → Set<assetId>
+- **New Functions**: `getAssetStringId()` for ID conversion
+- **Updated Functions**: `registerAsset()` now accepts asset string ID, `setAssetMetadata()` uses asset ID as key
+- **Improved Architecture**: Clear separation between numeric WASM IDs and string asset IDs
+
+### 📚 Documentation
+- Added comprehensive `MASONRY_LAYOUT_REFACTOR.md` documentation
+- Includes visual diagrams, usage examples, and migration guide
+
+## [1.0.6] - 2026-01-23
+
+### 🔄 Refactored
+
+#### Asset Metadata System
+- **Centralized Metadata Storage**: Removed global `imageColors` Map, replaced with unified asset metadata registry
+- **Color Data Management**: Color information now stored in asset metadata alongside other intrinsic properties
+- **Improved Architecture**: All asset data (colors, dimensions, file info) stored in one place for better maintainability
+- **Better API**: New `getAssetMetadata()`, `setAssetMetadata()`, and `updateAssetColor()` functions exported from the library
+
+### ✨ Enhanced
+
+#### Color Sorting
+- **Group Selection Support**: Color sort now works on selected images (group select + sort) or all images
+- **Dynamic Column Count**: Automatically adjusts grid columns based on number of images being sorted
+- **Better Feedback**: Improved warning messages when color data is not available
+- **Metadata-Driven**: Sorts using pre-computed color scores from asset metadata
+
+### 📚 Documentation
+- Added comprehensive `ASSET_METADATA.md` documentation
+- Includes API reference, usage examples, and best practices
+- Explains color sorting system and metadata structure
+
 ## [1.0.0] - 2026-01-20
 
 ### 🎉 Initial Release

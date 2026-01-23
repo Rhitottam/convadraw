@@ -1,14 +1,40 @@
-import { useCallback, useEffect, useSyncExternalStore } from 'react'
-import type { CanvasImage } from '../types/canvas'
-import type { WASMExports } from '../utils/wasmLoader'
+import { useCallback, useEffect, useSyncExternalStore } from 'react';
+import type { CanvasImage } from '../types/canvas';
+import type { WASMExports } from '../utils/wasmLoader';
 
 // Asset ID to source URL mapping (kept in JS for efficient string handling)
-const assetRegistry = new Map<number, string>();
+const assetRegistry = new Map<number, string>(); // numericId -> src
+const numericToStringIdRegistry = new Map<number, string>(); // numericId -> assetStringId
 let nextAssetId = 1;
 
-export function registerAsset(src: string): number {
+// Asset metadata registry - stores intrinsic asset data like color, dimensions, etc.
+interface AssetMetadata {
+  originalWidth?: number;
+  originalHeight?: number;
+  originalAspectRatio?: number;
+  fileName?: string;
+  fileSize?: number;
+  fileType?: string;
+  uploadedAt?: string;
+  // Color data for sorting
+  color?: {
+    r: number;
+    g: number;
+    b: number;
+  };
+  colorScore?: number; // Computed: (r - g) / (r + g + b + 1)
+  [key: string]: any; // Allow custom metadata
+}
+
+const assetMetadataRegistry = new Map<string, AssetMetadata>(); // assetId -> metadata
+const srcToAssetIdsRegistry = new Map<string, Set<string>>(); // src -> Set<assetId> (reverse lookup)
+
+export function registerAsset(src: string, assetStringId?: string): number {
   const id = nextAssetId++;
   assetRegistry.set(id, src);
+  if (assetStringId) {
+    numericToStringIdRegistry.set(id, assetStringId);
+  }
   return id;
 }
 
@@ -18,7 +44,48 @@ export function getAssetSrc(assetId: number): string {
 
 export function clearAssetRegistry(): void {
   assetRegistry.clear();
+  numericToStringIdRegistry.clear();
   nextAssetId = 1;
+  assetMetadataRegistry.clear();
+  srcToAssetIdsRegistry.clear();
+}
+
+export function getAssetStringId(numericId: number): string | undefined {
+  return numericToStringIdRegistry.get(numericId);
+}
+
+// Asset metadata management
+export function setAssetMetadata(assetId: string, metadata: Partial<AssetMetadata>, src?: string): void {
+  const existing = assetMetadataRegistry.get(assetId) || {};
+  assetMetadataRegistry.set(assetId, { ...existing, ...metadata });
+  
+  // Update reverse lookup if src is provided
+  if (src) {
+    if (!srcToAssetIdsRegistry.has(src)) {
+      srcToAssetIdsRegistry.set(src, new Set());
+    }
+    srcToAssetIdsRegistry.get(src)!.add(assetId);
+  }
+}
+
+export function getAssetMetadata(assetId: string): AssetMetadata | undefined {
+  return assetMetadataRegistry.get(assetId);
+}
+
+export function updateAssetColor(src: string, color: { r: number; g: number; b: number }): void {
+  const colorScore = (color.r - color.g) / (color.r + color.g + color.b + 1);
+  
+  // Update all assets that use this src
+  const assetIds = srcToAssetIdsRegistry.get(src);
+  if (assetIds) {
+    assetIds.forEach(assetId => {
+      setAssetMetadata(assetId, { color, colorScore });
+    });
+  }
+}
+
+export function getAssetIdsBySrc(src: string): Set<string> {
+  return srcToAssetIdsRegistry.get(src) || new Set();
 }
 
 // Store for external subscription pattern
@@ -108,7 +175,10 @@ export function useCanvasActions(wasm: WASMExports | null) {
       
       wasm.beginBatchMove();
       moves.forEach(({ objectId, x, y }) => {
-        wasm.addToBatchMove(objectId, x, y);
+        // Get old position from WASM
+        const oldX = wasm.getObjectX(objectId);
+        const oldY = wasm.getObjectY(objectId);
+        wasm.addToBatchMove(objectId, oldX, oldY, x, y);
       });
       wasm.endBatchMove();
       syncFromWasm(wasm);
@@ -123,7 +193,12 @@ export function useCanvasActions(wasm: WASMExports | null) {
       
       wasm.beginBatchResize();
       resizes.forEach(({ objectId, x, y, width, height }) => {
-        wasm.addToBatchResize(objectId, x, y, width, height);
+        // Get old position and dimensions from WASM
+        const oldX = wasm.getObjectX(objectId);
+        const oldY = wasm.getObjectY(objectId);
+        const oldWidth = wasm.getObjectWidth(objectId);
+        const oldHeight = wasm.getObjectHeight(objectId);
+        wasm.addToBatchResize(objectId, oldX, oldY, oldWidth, oldHeight, x, y, width, height);
       });
       wasm.endBatchResize();
       syncFromWasm(wasm);
@@ -154,16 +229,18 @@ export function useCanvasActions(wasm: WASMExports | null) {
 
   const undo = useCallback(() => {
     if (!wasm) return false;
-    const result = wasm.undo();
-    if (result) syncFromWasm(wasm);
-    return result;
+    if (!wasm.canUndo()) return false;
+    wasm.undo();
+    syncFromWasm(wasm);
+    return true;
   }, [wasm]);
 
   const redo = useCallback(() => {
     if (!wasm) return false;
-    const result = wasm.redo();
-    if (result) syncFromWasm(wasm);
-    return result;
+    if (!wasm.canRedo()) return false;
+    wasm.redo();
+    syncFromWasm(wasm);
+    return true;
   }, [wasm]);
 
   const canUndo = useCallback(() => {
@@ -211,8 +288,8 @@ export function useUndoRedoShortcuts(
 
       if (isMod && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
-        const result = wasm.undo();
-        if (result) {
+        if (wasm.canUndo()) {
+          wasm.undo();
           syncFromWasm(wasm);
           onUndoRedo?.();
         }
@@ -221,8 +298,8 @@ export function useUndoRedoShortcuts(
         (isMod && e.key === 'y')
       ) {
         e.preventDefault();
-        const result = wasm.redo();
-        if (result) {
+        if (wasm.canRedo()) {
+          wasm.redo();
           syncFromWasm(wasm);
           onUndoRedo?.();
         }

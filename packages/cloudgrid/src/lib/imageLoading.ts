@@ -32,13 +32,12 @@ interface DecodedEntry {
 const decodedBitmaps = new Map<string, DecodedEntry>();
 const decodingImages = new Map<string, LODLevel>(); // Track what level is being decoded
 
-// Color data for sorting
+// Color data interface (for worker communication)
 export interface ImageColor {
   r: number;
   g: number;
   b: number;
 }
-export const imageColors = new Map<string, ImageColor>();
 
 let imageWorker: Worker | null = null;
 
@@ -61,9 +60,8 @@ export function getImageWorker(): Worker {
         cachedBlobs.add(id);
         loadingBlobs.delete(id);
         
-        // Store color data for sorting
+        // Dispatch color event (will be stored in asset metadata by Canvas)
         if (color) {
-          imageColors.set(id, color);
           window.dispatchEvent(new CustomEvent('image-color-ready', { detail: { id, color } }));
         }
         

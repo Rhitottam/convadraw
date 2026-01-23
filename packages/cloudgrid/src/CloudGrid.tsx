@@ -1,4 +1,3 @@
-import type { CreateItem } from '@convadraw/editor'
 import type { CanvasSnapshot, ToolType } from '@convadraw/state'
 import React, {
     forwardRef,
@@ -15,6 +14,7 @@ import { StatsPanel, type PanelPosition } from './StatsPanel'
 import { WasmProvider } from './WasmContext'
 import { Canvas } from './components'
 import { syncFromWasm } from './hooks/useCanvasStore'
+import type { Asset } from './types/assets'
 import { loadWASM, type WASMExports } from './utils/wasmLoader'
 
 // Component slots that can be customized
@@ -32,8 +32,8 @@ export interface CloudGridComponents {
 }
 
 export interface CloudGridProps {
-  /** Initial items to display on the canvas */
-  initialItems?: CreateItem[]
+  /** Initial assets to display on the canvas */
+  initialAssets?: Asset[]
   
   /** Grid size in pixels */
   gridSize?: number
@@ -89,6 +89,15 @@ export interface CloudGridProps {
   /** Callback when viewport changes - TODO: implement with WASM */
   onViewportChange?: (viewport: { x: number; y: number; zoom: number }) => void
   
+  /** Callback when new assets are added (e.g., via file upload) */
+  onAssetAdd?: (assets: Asset[]) => void
+  
+  /** Callback when assets are updated */
+  onAssetUpdate?: (id: string, asset: Partial<Asset>) => void
+  
+  /** Callback when assets are deleted */
+  onAssetDelete?: (ids: string[]) => void
+  
   /** Child components (rendered inside the context) */
   children?: ReactNode
 }
@@ -129,7 +138,7 @@ export interface CloudGridRef {
  */
 export const CloudGrid = forwardRef<CloudGridRef, CloudGridProps>(function CloudGrid(
   {
-    initialItems: _initialItems, // TODO: Add items to WASM after loading
+    initialAssets,
     gridSize = 25,
     snapToGrid = true,
     showGrid: _showGrid, // TODO: Implement grid visibility toggle
@@ -148,6 +157,9 @@ export const CloudGrid = forwardRef<CloudGridRef, CloudGridProps>(function Cloud
     onChange: _onChange, // TODO: Wire up WASM state change callbacks
     onSelectionChange: _onSelectionChange, // TODO: Wire up selection callbacks
     onViewportChange: _onViewportChange, // TODO: Wire up viewport callbacks
+    onAssetAdd,
+    onAssetUpdate: _onAssetUpdate, // TODO: Wire up asset update callbacks
+    onAssetDelete: _onAssetDelete, // TODO: Wire up asset delete callbacks
     children,
   },
   ref
@@ -157,9 +169,10 @@ export const CloudGrid = forwardRef<CloudGridRef, CloudGridProps>(function Cloud
   const [isReady, setIsReady] = useState(false)
   const [wasm, setWasm] = useState<WASMExports | null>(null)
   const [activeTool, setActiveTool] = useState<ToolType>(initialTool)
+  const [_assets, setAssets] = useState<Asset[]>(initialAssets || []) // Track assets (for future API methods)
   const prevStatsRef = useRef({ visible: 0, total: 0, fps: 0 })
 
-  // Load WASM
+  // Load WASM and initialize with assets
   useEffect(() => {
     loadWASM()
       .then(async (wasmInstance) => {
@@ -168,40 +181,46 @@ export const CloudGrid = forwardRef<CloudGridRef, CloudGridProps>(function Cloud
         if (snapToGrid !== undefined) wasmInstance.setGridSnap(snapToGrid)
         if (gridSize) wasmInstance.setGridSize(gridSize)
         
-        // TODO: Add initialItems to WASM
-        // For now, add some test images
-        const { registerAsset } = await import('./hooks/useCanvasStore')
-        
-        const IMAGE_COUNT = 2000
-        const COLS = 50
-        const IMAGE_WIDTH = 400
-        const IMAGE_HEIGHT = 300
-        const GAP = 50
-        const CELL_WIDTH = IMAGE_WIDTH + GAP
-        const CELL_HEIGHT = IMAGE_HEIGHT + GAP
-        
-        const imageSizes = [
-          { w: 1920, h: 1080 },
-          { w: 1600, h: 900 },
-          { w: 1280, h: 720 },
-          { w: 1024, h: 768 },
-        ]
-        
-        for (let i = 0; i < IMAGE_COUNT; i++) {
-          const col = i % COLS
-          const row = Math.floor(i / COLS)
-          const size = imageSizes[i % imageSizes.length]
-          const src = `https://picsum.photos/seed/cloudgrid${i}/${size.w}/${size.h}`
+        // Initialize with provided assets
+        if (initialAssets && initialAssets.length > 0) {
+          const { registerAsset, setAssetMetadata } = await import('./hooks/useCanvasStore')
+          const { isImageAsset, isVideoAsset } = await import('./types/assets')
           
-          const assetId = registerAsset(src)
-          wasmInstance.addObject(
-            col * CELL_WIDTH,
-            row * CELL_HEIGHT,
-            IMAGE_WIDTH,
-            IMAGE_HEIGHT,
-            assetId,
-            0 // type: image
-          )
+          for (const asset of initialAssets) {
+            // Register media assets (images, videos) with asset string ID
+            let numericAssetId = 0
+            if (isImageAsset(asset)) {
+              numericAssetId = registerAsset(asset.src, asset.id)
+              // Store asset metadata (indexed by asset.id)
+              if (asset.metadata) {
+                setAssetMetadata(asset.id, asset.metadata, asset.src)
+              }
+            } else if (isVideoAsset(asset)) {
+              numericAssetId = registerAsset(asset.src, asset.id)
+              // Store asset metadata (indexed by asset.id)
+              if (asset.metadata) {
+                setAssetMetadata(asset.id, asset.metadata, asset.src)
+              }
+            }
+            // TODO: Handle text, shapes, canvas/svg assets
+            
+            // Determine object type for WASM
+            let objectType = 0 // Default: unknown
+            if (asset.type === 'image') objectType = 1
+            else if (asset.type === 'video') objectType = 2
+            else if (asset.type === 'text') objectType = 3
+            // TODO: Add more types
+            
+            // Add to WASM
+            wasmInstance.addObject(
+              asset.x,
+              asset.y,
+              asset.w,
+              asset.h,
+              numericAssetId,
+              objectType
+            )
+          }
         }
         
         setWasm(wasmInstance)
@@ -209,7 +228,7 @@ export const CloudGrid = forwardRef<CloudGridRef, CloudGridProps>(function Cloud
       .catch((err) => {
         setError(err instanceof Error ? err : new Error('Failed to load WASM'))
       })
-  }, [])
+  }, [initialAssets, gridSize, snapToGrid])
 
   // Expose ref methods
   useImperativeHandle(ref, () => ({
@@ -235,6 +254,21 @@ export const CloudGrid = forwardRef<CloudGridRef, CloudGridProps>(function Cloud
       onMount?.(wasm)
     }
   }, [wasm, isReady, onMount])
+
+  // Listen for asset additions from Canvas (e.g., file uploads)
+  useEffect(() => {
+    const handleAssetsAdded = (e: Event) => {
+      const customEvent = e as CustomEvent<{ assets: Asset[] }>
+      if (customEvent.detail?.assets) {
+        const newAssets = customEvent.detail.assets
+        setAssets(prev => [...prev, ...newAssets])
+        onAssetAdd?.(newAssets)
+      }
+    }
+
+    window.addEventListener('assets-added', handleAssetsAdded)
+    return () => window.removeEventListener('assets-added', handleAssetsAdded)
+  }, [onAssetAdd])
 
   // Render error state
   if (error) {

@@ -18,6 +18,21 @@ export { WASMToolbar } from './WASMToolbar'
 export { Editor } from '@convadraw/editor'
 export type { EditorOptions } from '@convadraw/editor'
 
+// Asset types (primary API for users)
+export type {
+    Asset,
+    BaseAsset,
+    CanvasAsset,
+    CreateAssetInput,
+    ImageAsset,
+    ShapeAsset,
+    ShapeType,
+    TextAsset,
+    UpdateAssetInput,
+    VideoAsset
+} from './types/assets'
+export { generateAssetId, isAsset, isCanvasAsset, isImageAsset, isShapeAsset, isTextAsset, isVideoAsset } from './types/assets'
+
 // Re-export commonly used types
 export type {
     CanvasItem, CanvasSnapshot, CreateImageItem, CreateItem, CreateTextItem, CreateVideoItem, GridSettings, GroupItem, ImageItem, ItemType, TextItem, ToolType, VideoItem, Viewport
@@ -36,3 +51,5 @@ export { cn } from './lib/utils'
 // Helper functions for programmatic control
 export { addMedia, deleteSelected, selectItems, sortByColor, zoomToBounds, zoomToSelected } from './helpers'
 
+// Asset metadata management (for advanced usage)
+export { getAssetMetadata, setAssetMetadata, updateAssetColor } from './hooks/useCanvasStore'

@@ -5,21 +5,25 @@ import { Layer, Rect, Stage, Transformer } from 'react-konva'
 import { useCamera } from '../CameraContext'
 import { updateCameraState } from '../hooks/useCameraState'
 import {
-  clearAssetRegistry,
+  getAssetMetadata,
+  getAssetStringId,
   getNumericId,
   registerAsset,
+  setAssetMetadata,
   syncFromWasm,
+  updateAssetColor,
   useCanvasActions,
   useCanvasStore,
   useUndoRedoShortcuts,
 } from '../hooks/useCanvasStore'
 import { getGroupSnapOffset, snapDimensionsToGrid, snapToGrid } from '../lib/grid-utils'
-import { getImageWorker, imageColors, requestBlobCache } from '../lib/imageLoading'
+import { getImageWorker } from '../lib/imageLoading'
+import { generateAssetId, type ImageAsset } from '../types/assets'
 import type { WASMExports } from '../utils/wasmLoader'
 
 // Import components
 import { CanvasImageNode } from './CanvasImageNode'
-import { MIN_SIZE_MULTIPLIER, MAX_SIZE_MULTIPLIER, type SelectionRect } from './constants'
+import { MAX_SIZE_MULTIPLIER, MIN_SIZE_MULTIPLIER, type SelectionRect } from './constants'
 import { GridLayer } from './GridLayer'
 
 // Import Hammer.js for touch gestures
@@ -51,10 +55,6 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   const animationIdRef = useRef(0);
   const wasmInitializedRef = useRef(false);
   const imageNodesRef = useRef<Map<string, Konva.Image | null>>(new Map());
-  
-  // Color sorting state
-  const [colorsLoaded, setColorsLoaded] = useState(0);
-  const totalImagesRef = useRef(0);
 
   // Refs and state for gesture handling
   const activeToolRef = useRef<ToolType>(activeTool);
@@ -141,65 +141,17 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
-  // Initialize WASM and images
+  // Sync WASM state to React on mount (assets are already added by CloudGrid)
   useEffect(() => {
     if (!wasm || wasmInitializedRef.current) return;
     wasmInitializedRef.current = true;
     
-    // Clear any existing state
-    clearAssetRegistry();
-    wasm.createCanvas(dimensions.width, dimensions.height, gridSize);
-
-    const IMAGE_COUNT = 2000;
-    const COLS = 50;
-    
-    // Store total for color sorting
-    totalImagesRef.current = IMAGE_COUNT;
-    const IMAGE_WIDTH = snapToGrid(400, gridSize);
-    const IMAGE_HEIGHT = snapToGrid(300, gridSize);
-    const GAP = snapToGrid(50, gridSize);
-    const CELL_WIDTH = IMAGE_WIDTH + GAP;
-    const CELL_HEIGHT = IMAGE_HEIGHT + GAP;
-
-    const imageSizes = [
-      { w: 1920, h: 1080 },
-      { w: 1600, h: 900 },
-      { w: 1280, h: 720 },
-      { w: 1024, h: 768 },
-    ];
-
-    const offsetX = snapToGrid(-(COLS * CELL_WIDTH) / 2, gridSize);
-    const offsetY = snapToGrid(-(Math.ceil(IMAGE_COUNT / COLS) * CELL_HEIGHT) / 2, gridSize);
-
-    // Add all images via WASM
-    for (let i = 0; i < IMAGE_COUNT; i++) {
-      const col = i % COLS;
-      const row = Math.floor(i / COLS);
-      const src = `https://picsum.photos/seed/cloudgrid${i}/${imageSizes[i % imageSizes.length].w}/${imageSizes[i % imageSizes.length].h}`;
-      const assetId = registerAsset(src);
-      
-      wasm.addObject(
-        offsetX + col * CELL_WIDTH,
-        offsetY + row * CELL_HEIGHT,
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-        assetId,
-        1 // objectType: image
-      );
-    }
-
     // Sync state from WASM to React
     syncFromWasm(wasm);
     
-    // Preload all image blobs to extract colors for sorting
-    // This happens in the background without blocking rendering
-    getImageWorker(); // Ensure worker is initialized
-    
-    for (let i = 0; i < IMAGE_COUNT; i++) {
-      const src = `https://picsum.photos/seed/cloudgrid${i}/${imageSizes[i % imageSizes.length].w}/${imageSizes[i % imageSizes.length].h}`;
-      requestBlobCache(src);
-    }
-  }, [wasm, dimensions.width, dimensions.height, gridSize]);
+    // Initialize worker for image loading
+    getImageWorker();
+  }, [wasm]);
 
   useEffect(() => {
     activeToolRef.current = activeTool;
@@ -256,7 +208,6 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     });
     hammer.on('panend', () => {
       panStartPos = null;
-      console.log('panend', panStartPos);
     });
 
     // Handle pinch gesture (zoom)
@@ -265,7 +216,6 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     let pinchCenter = { x: 0, y: 0 };
 
     hammer.on('pinchstart', (e: any) => {
-      console.log('pinchstart');
       setIsPinching(true); // Update state to disable draggable
       isPinchingRef.current = true; // Update ref for immediate access in callbacks
       pinchStartScale = e.target.attrs.scaleX;
@@ -299,7 +249,6 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     });
 
     hammer.on('pinchend', () => {
-      console.log('pinchend');
       pinchStartPos = null;
       setIsPinching(false); // Update state to re-enable draggable
       isPinchingRef.current = false; // Update ref for immediate access in callbacks
@@ -329,9 +278,14 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   }, [visibleImages.length, images.length, onStatsUpdate]);
 
   // Track color loading progress
+  // Track image color loading and store in asset metadata
   useEffect(() => {
-    const handleColorReady = () => {
-      setColorsLoaded(imageColors.size);
+    const handleColorReady = (e: Event) => {
+      const customEvent = e as CustomEvent<{ id: string; color: { r: number; g: number; b: number } }>;
+      const { id, color } = customEvent.detail;
+      
+      // Store color data in asset metadata
+      updateAssetColor(id, color);
     };
     
     window.addEventListener('image-color-ready', handleColorReady as EventListener);
@@ -471,91 +425,177 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   }, [wasm, gridSize]);
 
   // Function to sort images by color (exposed via custom event)
+  // Supports sorting selected images or all images
   const sortImagesByColor = useCallback(() => {
     if (!wasm) {
       return;
     }
-    if (totalImagesRef.current === 0 || colorsLoaded < totalImagesRef.current) {
+    
+    // Determine which images to sort: selected or all
+    const imagesToSort = selectedIds.length > 0 
+      ? images.filter((img) => selectedIds.includes(img.id))
+      : images;
+    
+    if (imagesToSort.length === 0) {
+      console.warn('No images to sort');
       return;
     }
     
-    // Normalize all heights before sorting (this is a batch operation)
+    // Check if all images have color data
+    const imagesWithColor = imagesToSort.filter((img) => {
+      const numericId = getNumericId(img.id);
+      if (!numericId) return false;
+      const assetStringId = getAssetStringId(numericId);
+      if (!assetStringId) return false;
+      const metadata = getAssetMetadata(assetStringId);
+      return metadata?.colorScore !== undefined;
+    });
+    
+    if (imagesWithColor.length === 0) {
+      console.warn('No color data available for images. Please wait for images to load.');
+      return;
+    }
+    
+    if (imagesWithColor.length < imagesToSort.length) {
+      console.warn(
+        `Color data available for ${imagesWithColor.length}/${imagesToSort.length} images. ` +
+        `Sorting ${imagesWithColor.length} images.`
+      );
+    }
+    
+    // Get numeric IDs for images to normalize
+    const itemIds = imagesWithColor.map((img) => getNumericId(img.id)).filter((id): id is number => id !== null && id !== 0);
+    
+    // Normalize heights for items being sorted (this is a batch operation)
     let avgHeight = 0;
     try {
-      avgHeight = normalizeItemHeights();
+      avgHeight = normalizeItemHeights(itemIds);
       if (avgHeight === 0) return;
     } catch (error) {
       console.error('Failed to normalize heights during color sort:', error);
       return;
     }
     
-    const IMAGE_COUNT = totalImagesRef.current;
-    const COLS = 50;
-    const ROWS = Math.ceil(IMAGE_COUNT / COLS);
+    // Get color scores from asset metadata
+    const imageScores: Array<{ id: string; src: string; score: number; originalIdx: number; assetId: string; width: number; height: number }> = [];
     
-    // Calculate color score for each image: (R - G) / (R + G + B + 1)
-    // Higher = more red, Lower = more green, Middle = more blue
-    const imageScores: Array<{ id: string; src: string; score: number; originalIdx: number }> = [];
-    
-    images.forEach((img, idx) => {
-      const color = imageColors.get(img.src);
-      if (color) {
-        const { r, g, b } = color;
-        const score = (r - g) / (r + g + b + 1);
-        imageScores.push({ id: img.id, src: img.src, score, originalIdx: idx });
+    imagesWithColor.forEach((img, idx) => {
+      const numericId = getNumericId(img.id);
+      if (!numericId) return;
+      const assetStringId = getAssetStringId(numericId);
+      if (!assetStringId) return;
+      const metadata = getAssetMetadata(assetStringId);
+      if (metadata?.colorScore !== undefined) {
+        imageScores.push({ 
+          id: img.id, 
+          src: img.src, 
+          score: metadata.colorScore, 
+          originalIdx: idx,
+          assetId: assetStringId,
+          width: img.width,
+          height: img.height
+        });
       }
     });
     
     // Sort by score (highest/reddest first)
     imageScores.sort((a, b) => b.score - a.score);
     
-    // Create position mapping based on diagonal index
-    // diagIdx = row + (maxCol - col), lower = top-right (reddest), higher = bottom-left (greenest)
-    const positions: Array<{ row: number; col: number; diagIdx: number }> = [];
-    for (let row = 0; row < ROWS; row++) {
-      for (let col = 0; col < COLS; col++) {
-        const idx = row * COLS + col;
-        if (idx >= IMAGE_COUNT) break;
-        const diagIdx = row + (COLS - 1 - col);
-        positions.push({ row, col, diagIdx });
-      }
-    }
-    
-    // Sort positions by diagonal index (ascending = top-right first)
-    positions.sort((a, b) => a.diagIdx - b.diagIdx);
-    
-    // Calculate new positions using normalized height
+    // Calculate start position (below bottommost image for group sort, or centered for all)
     const normalizedHeight = snapToGrid(avgHeight, gridSize);
     const GAP = snapToGrid(50, gridSize);
     
-    // Calculate average width from all items (they all have same height now)
-    let totalWidth = 0;
-    for (let i = 0; i < wasm.getObjectCount(); i++) {
-      const id = wasm.getObjectIdAtIndex(i);
-      if (wasm.objectExists(id)) {
-        totalWidth += wasm.getObjectWidth(id);
+    let startY = 0;
+    let startX = 0;
+    
+    if (selectedIds.length > 0) {
+      // Group sort: position below bottommost image
+      let maxBottomY = -Infinity;
+      for (let i = 0; i < wasm.getObjectCount(); i++) {
+        const id = wasm.getObjectIdAtIndex(i);
+        if (wasm.objectExists(id)) {
+          const y = wasm.getObjectY(id);
+          const height = wasm.getObjectHeight(id);
+          maxBottomY = Math.max(maxBottomY, y + height);
+        }
       }
+      startY = snapToGrid(maxBottomY + GAP * 2, gridSize);
+      startX = 0; // Centered
+    } else {
+      // Sort all: use centered layout
+      startX = 0;
+      startY = 0;
     }
-    const avgWidth = totalWidth / wasm.getObjectCount();
     
-    const CELL_WIDTH = snapToGrid(avgWidth, gridSize) + GAP;
-    const CELL_HEIGHT = normalizedHeight + GAP;
-    const offsetX = snapToGrid(-(COLS * CELL_WIDTH) / 2, gridSize);
-    const offsetY = snapToGrid(-(ROWS * CELL_HEIGHT) / 2, gridSize);
+    // Create masonry layout with fixed height, variable width
+    const MAX_ROW_WIDTH = 8000; // Max width per row before wrapping
+    const rows: Array<Array<{ id: string; numericId: number; width: number; height: number; x: number; y: number }>> = [];
+    let currentRow: Array<{ id: string; numericId: number; width: number; height: number; x: number; y: number }> = [];
+    let currentRowWidth = 0;
     
-    // Map sorted images to sorted positions
-    const moves: Array<{ id: string; numericId: number; newX: number; newY: number }> = [];
-    
-    imageScores.forEach((imgScore, sortedIdx) => {
-      if (sortedIdx >= positions.length) return;
-      const pos = positions[sortedIdx];
-      const newX = offsetX + pos.col * CELL_WIDTH;
-      const newY = offsetY + pos.row * CELL_HEIGHT;
+    imageScores.forEach((imgScore) => {
       const numericId = getNumericId(imgScore.id);
+      if (!numericId) return;
       
-      if (numericId !== null) {
-        moves.push({ id: imgScore.id, numericId, newX, newY });
+      // Get current dimensions from WASM (after normalization)
+      const currentWidth = wasm.getObjectWidth(numericId);
+      const currentHeight = wasm.getObjectHeight(numericId);
+      
+      // Calculate width for normalized height (masonry: fixed height, variable width)
+      const aspectRatio = currentWidth / currentHeight;
+      const newWidth = snapToGrid(normalizedHeight * aspectRatio, gridSize);
+      
+      // Check if adding this image would exceed max row width
+      if (currentRow.length > 0 && currentRowWidth + GAP + newWidth > MAX_ROW_WIDTH) {
+        // Start new row
+        rows.push(currentRow);
+        currentRow = [];
+        currentRowWidth = 0;
       }
+      
+      currentRow.push({
+        id: imgScore.id,
+        numericId,
+        width: newWidth,
+        height: normalizedHeight,
+        x: 0, // Will be calculated below
+        y: 0, // Will be calculated below
+      });
+      
+      currentRowWidth += (currentRow.length > 1 ? GAP : 0) + newWidth;
+    });
+    
+    // Add the last row
+    if (currentRow.length > 0) {
+      rows.push(currentRow);
+    }
+    
+    // Calculate x,y positions for each row (centered) and create moves array
+    const moves: Array<{ id: string; numericId: number; newX: number; newY: number; newWidth: number; newHeight: number }> = [];
+    let currentY = startY;
+    rows.forEach((row) => {
+      // Calculate total width of this row (including gaps)
+      const rowWidth = row.reduce((sum, item, idx) => sum + item.width + (idx > 0 ? GAP : 0), 0);
+      const rowStartX = snapToGrid(startX - rowWidth / 2, gridSize);
+      
+      let currentX = rowStartX;
+      row.forEach((item) => {
+        item.x = currentX;
+        item.y = currentY;
+        
+        moves.push({
+          id: item.id,
+          numericId: item.numericId,
+          newX: item.x,
+          newY: item.y,
+          newWidth: item.width,
+          newHeight: item.height,
+        });
+        
+        currentX += item.width + GAP;
+      });
+      
+      currentY += normalizedHeight + GAP;
     });
     
     // Calculate scaled animation duration based on item count
@@ -564,28 +604,34 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     const maxDuration = 3.0; // seconds
     const threshold = 1000;
     const scaledDuration = Math.min(
-      baseDuration + (IMAGE_COUNT / threshold) * 1.0,
+      baseDuration + (imageScores.length / threshold) * 1.0,
       maxDuration
     );
     
-    // Update ALL items in WASM first (so non-visible items get new positions)
+    // Update ALL items in WASM first with new positions and dimensions
     moves.forEach((move) => {
-      wasm.moveObject(move.numericId, move.newX, move.newY);
+      // Resize to normalized height with correct aspect ratio
+      wasm.resizeObject(move.numericId, move.newX, move.newY, move.newWidth, move.newHeight);
     });
     
-    // Then animate visible Konva nodes
+    // Then animate visible Konva nodes (position AND dimensions)
     moves.forEach((move) => {
       const node = imageNodesRef.current.get(move.id);
       if (node) {
-        // Get current position from Konva node
+        // Get current state from Konva node
         const currentX = node.x();
         const currentY = node.y();
+        const currentWidth = node.width();
+        const currentHeight = node.height();
         
-        // Only animate if position actually changed
-        if (currentX !== move.newX || currentY !== move.newY) {
+        // Animate if position or dimensions changed
+        if (currentX !== move.newX || currentY !== move.newY || 
+            currentWidth !== move.newWidth || currentHeight !== move.newHeight) {
           node.to({
             x: move.newX,
             y: move.newY,
+            width: move.newWidth,
+            height: move.newHeight,
             duration: scaledDuration,
             easing: Konva.Easings.EaseInOut,
           });
@@ -597,7 +643,7 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     setTimeout(() => {
       syncFromWasm(wasm);
     }, scaledDuration * 1000 + 100);
-  }, [wasm, colorsLoaded, images, gridSize, normalizeItemHeights]);
+  }, [wasm, images, selectedIds, gridSize, normalizeItemHeights]);
 
   // Listen for color sort event from StatsPanel
   useEffect(() => {
@@ -642,14 +688,8 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     const GAP = snapToGrid(50, gridSize);
     const startY = snapToGrid(maxBottomY + GAP, gridSize);
     
-    // Load all images to get their dimensions
-    const imageDataArray: Array<{
-      src: string;
-      assetId: number;
-      width: number;
-      height: number;
-      file: File;
-    }> = [];
+    // Load all images and create Asset objects
+    const newAssets: ImageAsset[] = [];
     
     for (const file of Array.from(files)) {
       if (!file.type.match(/^image\/(png|jpeg|jpg)$/)) {
@@ -668,8 +708,10 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
           img.src = src;
         });
         
-        // Calculate dimensions using target height and aspect ratio
-        const aspectRatio = img.width / img.height;
+        // Store original dimensions
+        const originalWidth = img.width;
+        const originalHeight = img.height;
+        const aspectRatio = originalWidth / originalHeight;
         
         // Snap dimensions to grid while maintaining aspect ratio
         const { width, height } = snapDimensionsToGrid(
@@ -678,44 +720,72 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
           gridSize
         );
         
-        const assetId = registerAsset(src);
-        imageDataArray.push({ src, assetId, width, height, file });
+        // Create Asset object with metadata (only intrinsic properties)
+        const asset: ImageAsset = {
+          id: generateAssetId(),
+          type: 'image',
+          x: 0, // Will be calculated after we know total width
+          y: startY,
+          w: width,  // Display width
+          h: height, // Display height
+          src,
+          alt: file.name,
+          // Metadata: ONLY intrinsic properties from the source file
+          metadata: {
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type,
+            originalWidth,   // Original dimensions from file
+            originalHeight,
+            uploadedAt: new Date().toISOString(),
+          },
+        };
+        
+        newAssets.push(asset);
       } catch (error) {
         console.warn('Failed to load image:', file.name, error);
         URL.revokeObjectURL(src);
       }
     }
     
-    if (imageDataArray.length === 0) return;
+    if (newAssets.length === 0) return;
     
     // Calculate total width for centering
-    const totalWidth = imageDataArray.reduce((sum, img) => sum + img.width, 0) + 
-                       GAP * (imageDataArray.length - 1);
+    const totalWidth = newAssets.reduce((sum, asset) => sum + asset.w, 0) + 
+                       GAP * (newAssets.length - 1);
     const centerX = 0;
     let currentX = snapToGrid(centerX - totalWidth / 2, gridSize);
+    
+    // Update asset x positions for centered layout
+    newAssets.forEach((asset) => {
+      asset.x = currentX;
+      currentX += asset.w + GAP;
+    });
     
     // Track newly added item IDs and bounds
     const newItemIds: string[] = [];
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     
-    // Add images to WASM
-    imageDataArray.forEach((imgData) => {
-      const x = currentX;
-      const y = startY;
+    // Add assets to WASM and store metadata
+    newAssets.forEach((asset) => {
+      // Register the asset source with asset ID
+      const numericAssetId = registerAsset(asset.src, asset.id);
+      
+      // Store asset metadata in registry (indexed by asset.id)
+      if (asset.metadata) {
+        setAssetMetadata(asset.id, asset.metadata, asset.src);
+      }
       
       // Add to WASM and get the ID
-      const numericId = wasm.addObject(x, y, imgData.width, imgData.height, imgData.assetId, 0);
+      const numericId = wasm.addObject(asset.x, asset.y, asset.w, asset.h, numericAssetId, 1); // objectType 1 = image
       const stringId = `img-${numericId}`;
       newItemIds.push(stringId);
       
       // Update bounds
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x + imgData.width);
-      maxY = Math.max(maxY, y + imgData.height);
-      
-      // Move to next position
-      currentX += imgData.width + GAP;
+      minX = Math.min(minX, asset.x);
+      minY = Math.min(minY, asset.y);
+      maxX = Math.max(maxX, asset.x + asset.w);
+      maxY = Math.max(maxY, asset.y + asset.h);
     });
     
     syncFromWasm(wasm);
@@ -767,6 +837,11 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     // Select newly added items
     if (newItemIds.length > 0) {
       setSelectedIds(newItemIds);
+      
+      // Dispatch event for asset addition (for CloudGrid to track)
+      window.dispatchEvent(new CustomEvent('assets-added', {
+        detail: { assets: newAssets }
+      }));
       
       // Dispatch event to zoom to these items
       window.dispatchEvent(new CustomEvent('zoom-to-bounds', {
@@ -916,7 +991,6 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   // Handle drag start
   const handleDragStart = useCallback(() => {
     if (isPinchingRef.current) return;
-    console.log('dragstart', hammerRef.current);
     const positions = new Map<string, { x: number; y: number }>();
     selectedIds.forEach((id) => {
       const img = images.find((i) => i.id === id);
@@ -931,7 +1005,6 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   const handleDragMove = useCallback(
     (draggedId: string, newX: number, newY: number) => {
       if (isPinchingRef.current) return;
-      console.log('dragmove', hammerRef.current);
       if (!dragInitialPositionsRef.current || selectedIds.length <= 1) return;
       if (!selectedIds.includes(draggedId)) return;
 
@@ -1030,12 +1103,11 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
   );
 
   // Handle stage mouse down - start rubber band selection
-  const handleStageMouseDown = useCallback(
-    (e: Konva.KonvaEventObject<PointerEvent>) => {
+  const handleStagePointereDown = useCallback(
+    (e: Konva.KonvaEventObject<TouchEvent | MouseEvent | PointerEvent>) => {
       if (activeTool !== 'select') return;
       if (e.target !== e.target.getStage()) return;
       if (isPinchingRef.current) return;
-
       const stage = stageRef.current;
       if (!stage) return;
 
@@ -1056,9 +1128,10 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     [activeTool, stagePos, scale]
   );
 
+
   // Handle stage mouse move
-  const handleStageMouseMove = useCallback(
-    (_e: Konva.KonvaEventObject<PointerEvent>) => {
+  const handleStagePointerMove = useCallback(
+    (_e: Konva.KonvaEventObject<TouchEvent | MouseEvent>) => {
       if (!isSelecting || !selectionStartRef.current) return;
 
       const stage = stageRef.current;
@@ -1081,9 +1154,22 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
     [isSelecting, stagePos, scale]
   );
 
+  const handleStageMouseMove = useCallback(
+    (e: Konva.KonvaEventObject<MouseEvent>) => {
+      handleStagePointerMove(e);
+    },
+    [handleStagePointerMove]
+  );
+  const handleStageTouchMove = useCallback(
+    (e: Konva.KonvaEventObject<TouchEvent>) => {
+      handleStagePointerMove(e);
+    },
+    [handleStagePointerMove]
+  );
+
   // Handle stage mouse up
-  const handleStageMouseUp = useCallback(
-    (e: Konva.KonvaEventObject<PointerEvent>) => {
+  const handleStagePointerUp = useCallback(
+    (e: Konva.KonvaEventObject<TouchEvent | MouseEvent | PointerEvent>) => {
       if (!isSelecting || !selectionRect) {
         setIsSelecting(false);
         setSelectionRect(null);
@@ -1109,10 +1195,23 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
       setIsSelecting(false);
       setSelectionRect(null);
       selectionStartRef.current = null;
+
     },
     [isSelecting, selectionRect, images, selectedIds]
   );
 
+  const handleStageMouseUp = useCallback(
+    (e: Konva.KonvaEventObject<MouseEvent>) => {
+      handleStagePointerUp(e);
+    },
+    [handleStagePointerUp]
+  );
+  const handleStageTouchUp = useCallback(
+    (e: Konva.KonvaEventObject<TouchEvent>) => {
+      handleStagePointerUp(e);
+    },
+    [handleStagePointerUp]
+  );
   // Handle stage click
   const handleStageClick = useCallback(
     (e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => {
@@ -1264,9 +1363,13 @@ export const Canvas = memo(function Canvas({ wasm, activeTool, gridSize, onStats
         onClick={handleStageClick}
         onTap={handleStageClick}
         onWheel={handleWheel}
-        onPointerDown={handleStageMouseDown}
-        onPointerMove={handleStageMouseMove}
-        onPointerUp={handleStageMouseUp}
+        onPointerDown={handleStagePointereDown}
+        // onPointerUp={handleStagePointerUp}
+        onPointerMove={handleStagePointerMove}
+        onMouseUp={handleStageMouseUp}
+        // onTouchDown={handleStageTouchDown}
+        onTouchMove={handleStageTouchMove}
+        onTouchEnd={handleStageTouchUp}
         style={{ backgroundColor: 'oklch(0.09 0.01 255)' }}
       >
         {/* Grid layer */}
